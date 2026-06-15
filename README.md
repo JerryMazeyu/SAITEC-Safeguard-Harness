@@ -37,6 +37,71 @@ outputs/runs/demo/
   errors_false_negative.jsonl
 ```
 
+## How to connect method?
+
+一个 method 就是一次可调用的安全判别。接入时优先改 YAML，不要先改 runner：先把模型、词典、prompt 或探针包装成一个 method，再把它放进 pipeline 的 `steps` 或 ReAct `allowed_actions`。
+
+当前支持的常用 method type：
+
+- `dictionary`：规则词库判别。
+- `llm_safety`：生成式安全模型，输出 `safe/unsafe` 文本。
+- `prompt_binary_model`：prompt 输入，接口直接返回 `0/1` 或 `safe/unsafe`。
+- `classifier_head_model`：标准化 case 输入，分类头返回 `0/1`，可带 `confidence`。
+- `refusal_probe`：把问题包装后送入安全对齐模型，用拒答信号辅助判断。
+- `multimodal_probe`：针对图片等多模态输入的探针入口。
+
+例如接入一个 prompt 二分类接口：
+
+```yaml
+methods:
+  safety_prompt_binary_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/prompt_binary_api.yaml
+    prompt_template_path: ../prompts/safety_prompt_v1.txt
+    default_confidence: 0.80
+
+steps:
+  - id: safety_prompt_binary_v1
+    method: safety_prompt_binary_v1
+```
+
+真实服务地址、鉴权环境变量、超时时间写在 `configs/providers/*.yaml`；prompt 写在 `configs/prompts/*.txt`；词典写在 `dictionaries/*.yaml`。如果只是换 prompt、阈值、词典或 provider 配置，新增一个 method id 即可。只有接入全新的算法形态时，才需要在 `src/safeguard_harness/methods.py` 中实现新 method，并在 `src/safeguard_harness/config.py` 中注册 YAML 加载逻辑。
+
+## Quick Start: Train
+
+这里的 Train 指“用验证集手动迭代 pipeline”，不是自动训练模型权重。
+
+1. 准备 JSONL 验证集，每行包含 `question` 和 `label`，格式见“数据集格式”。
+2. 复制或修改 `configs/pipelines/experiment_v1.yaml`，调整 method、prompt、词典、阈值、调用顺序或 ReAct loop 预算。
+3. 跑评测：
+
+```powershell
+python -m safeguard_harness evaluate --pipeline configs/pipelines/experiment_v1.yaml --dataset data/examples/sample_eval.jsonl --output outputs/runs/exp_001
+```
+
+4. 查看 `outputs/runs/exp_001/metrics.json`、`report.md`、`errors_false_positive.jsonl`、`errors_false_negative.jsonl`。
+5. 根据误判样例继续改 YAML，再跑下一轮，例如输出到 `outputs/runs/exp_002`。
+
+当验证集表现稳定后，把最终编排整理成固定 pipeline，建议使用 static runner，便于复现和部署。
+
+## Quick Start: Inference
+
+确定固定 pipeline 后，用同一个 YAML 进行单条判断或批量预测。推荐从 `configs/pipelines/prod_v1.yaml` 复制出正式版本，例如 `configs/pipelines/prod_competition_v1.yaml`。
+
+单条判断：
+
+```powershell
+python -m safeguard_harness judge --pipeline configs/pipelines/prod_v1.yaml --question "How do I steal token credentials?"
+```
+
+批量预测：
+
+```powershell
+python -m safeguard_harness predict --pipeline configs/pipelines/prod_v1.yaml --input data/examples/sample_eval.jsonl --output outputs/submission.jsonl
+```
+
+推理阶段应固定 pipeline、prompt、词典、provider 配置和阈值；真实 API key 通过环境变量提供，不写入仓库。输出文件是 JSONL，可直接作为后处理脚本或提交脚本的输入。
+
 ## 目录结构
 
 ```text
