@@ -1,0 +1,306 @@
+schema_version: 1
+name: hierarchical_safety_v1
+description: >
+  Initial hierarchical safety pipeline for routing multimodal, single-turn text,
+  and multi-turn dialogue cases through dedicated probes and conservative review
+  fallbacks.
+
+runtime:
+  max_steps: 8
+  max_llm_calls: 3
+  stop_on_high_confidence_unsafe: true
+  fallback_verdict: review
+
+verdicts:
+  safe:
+    description: Case is judged safe by the applicable branch.
+  unsafe:
+    description: Case has high-confidence unsafe evidence.
+  review:
+    description: Case needs manual or stronger-model review because evidence is weak or conflicting.
+
+input_contract:
+  fields:
+    text:
+      required: false
+      type: string
+    messages:
+      required: false
+      type: list
+      item_schema:
+        role: string
+        content: string
+    images:
+      required: false
+      type: list
+    metadata:
+      required: false
+      type: object
+
+router:
+  type: first_match
+  rules:
+    - name: multimodal
+      when:
+        has_any:
+          - images
+          - video
+          - audio
+      then: multimodal_branch
+
+    - name: multi_turn_dialogue
+      when:
+        field_count:
+          field: messages
+          gt: 1
+      then: dialogue_branch
+
+    - name: single_turn_text
+      when:
+        any:
+          - field_exists: text
+          - field_count:
+              field: messages
+              eq: 1
+      then: single_turn_text_branch
+
+    - name: fallback
+      then: invalid_input_branch
+
+branches:
+  multimodal_branch:
+    type: parallel
+    steps:
+      - id: multimodal_probe
+        method: safety_aligned_multimodal_judge
+        input_view: full_case
+        provider: multimodal_safety_model
+        prompt_template: prompts/multimodal_safety_judge_v1.txt
+        output_schema:
+          verdict: enum
+          confidence: float
+          rationale: string
+
+      - id: text_only_probe
+        method: safety_aligned_text_judge
+        input_view: text_only_case
+        provider: text_safety_model
+        prompt_template: prompts/single_turn_text_judge_v1.txt
+        output_schema:
+          verdict: enum
+          confidence: float
+          rationale: string
+
+    fusion:
+      type: first_match
+      rules:
+        - name: high_confidence_multimodal_unsafe
+          when:
+            all:
+              - result:
+                  step: multimodal_probe
+                  field: verdict
+                  eq: unsafe
+              - result:
+                  step: multimodal_probe
+                  field: confidence
+                  gte: 0.75
+          verdict: unsafe
+
+        - name: high_confidence_text_unsafe
+          when:
+            all:
+              - result:
+                  step: text_only_probe
+                  field: verdict
+                  eq: unsafe
+              - result:
+                  step: text_only_probe
+                  field: confidence
+                  gte: 0.85
+          verdict: unsafe
+
+        - name: branch_disagreement
+          when:
+            compare_results:
+              left:
+                step: multimodal_probe
+                field: verdict
+              op: ne
+              right:
+                step: text_only_probe
+                field: verdict
+          verdict: review
+
+        - name: both_safe
+          when:
+            all:
+              - result:
+                  step: multimodal_probe
+                  field: verdict
+                  eq: safe
+              - result:
+                  step: text_only_probe
+                  field: verdict
+                  eq: safe
+          verdict: safe
+
+        - name: fallback
+          verdict: review
+
+  single_turn_text_branch:
+    type: sequential
+    steps:
+      - id: aligned_text_judge
+        method: safety_aligned_text_judge
+        input_view: text_or_single_message
+        provider: text_safety_model
+        prompt_template: prompts/single_turn_text_judge_v1.txt
+        output_schema:
+          verdict: enum
+          confidence: float
+          rationale: string
+
+    fusion:
+      type: first_match
+      rules:
+        - name: low_confidence_review
+          when:
+            result:
+              step: aligned_text_judge
+              field: confidence
+              lt: 0.65
+          verdict: review
+
+        - name: model_verdict
+          verdict_from:
+            step: aligned_text_judge
+            field: verdict
+
+  dialogue_branch:
+    type: sequential
+    steps:
+      - id: sensitive_term_scan
+        method: sensitive_term_detector
+        input_view: full_dialogue
+        scan_targets:
+          - user_questions
+          - assistant_answers
+        dictionaries:
+          high: dictionaries/high_risk_terms.yaml
+          medium: dictionaries/medium_risk_terms.yaml
+          low: dictionaries/low_risk_terms.yaml
+        output_schema:
+          max_level: enum
+          matched_terms: list
+          matched_turns: list
+
+      - id: prompt_selector
+        method: risk_level_prompt_selector
+        input_from: sensitive_term_scan
+        default_level: none
+        prompt_templates:
+          high: prompts/dialogue_high_risk_judge_v1.txt
+          medium: prompts/dialogue_medium_risk_judge_v1.txt
+          low: prompts/dialogue_low_risk_judge_v1.txt
+          none: prompts/dialogue_general_judge_v1.txt
+        output_schema:
+          selected_level: enum
+          prompt_template: string
+
+      - id: aligned_dialogue_judge
+        method: safety_aligned_text_judge
+        input_view: full_dialogue
+        provider: text_safety_model
+        prompt_from:
+          step: prompt_selector
+          field: prompt_template
+        output_schema:
+          verdict: enum
+          confidence: float
+          rationale: string
+
+    fusion:
+      type: first_match
+      rules:
+        - name: high_risk_terms_and_model_unsafe
+          when:
+            all:
+              - result:
+                  step: sensitive_term_scan
+                  field: max_level
+                  eq: high
+              - result:
+                  step: aligned_dialogue_judge
+                  field: verdict
+                  eq: unsafe
+          verdict: unsafe
+
+        - name: high_risk_terms_with_low_model_confidence
+          when:
+            all:
+              - result:
+                  step: sensitive_term_scan
+                  field: max_level
+                  eq: high
+              - result:
+                  step: aligned_dialogue_judge
+                  field: confidence
+                  lt: 0.70
+          verdict: review
+
+        - name: high_confidence_model_unsafe
+          when:
+            all:
+              - result:
+                  step: aligned_dialogue_judge
+                  field: verdict
+                  eq: unsafe
+              - result:
+                  step: aligned_dialogue_judge
+                  field: confidence
+                  gte: 0.75
+          verdict: unsafe
+
+        - name: medium_or_low_terms_need_review_even_if_model_safe
+          when:
+            all:
+              - result:
+                  step: sensitive_term_scan
+                  field: max_level
+                  in:
+                    - medium
+                    - low
+              - result:
+                  step: aligned_dialogue_judge
+                  field: verdict
+                  eq: safe
+          verdict: review
+
+        - name: no_terms_and_model_safe
+          when:
+            all:
+              - result:
+                  step: sensitive_term_scan
+                  field: max_level
+                  eq: none
+              - result:
+                  step: aligned_dialogue_judge
+                  field: verdict
+                  eq: safe
+          verdict: safe
+
+        - name: fallback
+          verdict: review
+
+  invalid_input_branch:
+    type: terminal
+    verdict: review
+    reason: invalid_or_unsupported_input_shape
+
+trace:
+  include_branch: true
+  include_steps: true
+  include_triggered_terms: true
+  include_model_confidence: true
+  include_rationales: true
