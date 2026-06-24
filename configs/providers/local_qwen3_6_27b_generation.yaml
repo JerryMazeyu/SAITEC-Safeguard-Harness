@@ -1,0 +1,18 @@
+type: local_text_generation_lm
+description: "Local Qwen3.6-27B generative model used by refusal probes."
+model_path: ../../models/Qwen3.6-27B
+trust_remote_code: true
+device_map: auto
+torch_dtype: auto
+max_memory:
+  0: 4GiB
+  1: 4GiB
+  2: 4GiB
+  3: 4GiB
+  cpu: 128GiB
+offload_folder: ../../outputs/model_offload/qwen3_6_27b
+use_chat_template: true
+enable_thinking: false
+do_sample: false
+max_new_tokens: 256
+cache_model: true

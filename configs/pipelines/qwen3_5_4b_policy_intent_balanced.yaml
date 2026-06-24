@@ -1,0 +1,25 @@
+name: qwen3_5_4b_policy_intent_balanced
+runner: static
+
+methods:
+  qwen3_5_4b_policy_binary_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_5_4b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_policy_v1.txt
+    default_confidence: 0.70
+
+  qwen3_5_4b_intent_binary_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_5_4b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_intent_v1.txt
+    default_confidence: 0.70
+
+steps:
+  - id: qwen3_5_4b_policy_binary_v1
+    method: qwen3_5_4b_policy_binary_v1
+  - id: qwen3_5_4b_intent_binary_v1
+    method: qwen3_5_4b_intent_binary_v1
+
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.60

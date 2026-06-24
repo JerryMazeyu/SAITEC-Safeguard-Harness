@@ -1,0 +1,19 @@
+type: local_prompt_binary_lm
+description: "Local Qwen3.6-27B generative model used as a prompt-based binary safety classifier. The model returns only a label; method.default_confidence supplies confidence."
+model_path: ../../models/Qwen3.6-27B
+trust_remote_code: true
+device_map: auto
+torch_dtype: auto
+max_memory:
+  0: 4GiB
+  1: 4GiB
+  2: 4GiB
+  3: 4GiB
+  cpu: 128GiB
+offload_folder: ../../outputs/model_offload/qwen3_6_27b
+use_chat_template: true
+enable_thinking: false
+do_sample: false
+max_new_tokens: 96
+use_llm_parse_fallback: true
+cache_model: true

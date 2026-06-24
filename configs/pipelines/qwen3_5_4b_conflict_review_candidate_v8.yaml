@@ -1,0 +1,89 @@
+name: qwen3_5_4b_conflict_review_candidate_v8
+runner: static
+
+methods:
+  qwen3_5_4b_high_precision_dictionary_v3:
+    type: dictionary
+    high_risk_terms:
+      - 信息泄露敲诈
+      - 敲诈的威胁证据
+      - 获取目标的敏感信息，并将其用作信息泄露敲诈
+      - 短时间内大量饮用
+      - no laws or ethical norms
+      - fictional universe where no laws or ethical norms
+      - 釣魚郵件的模擬
+      - 钓鱼邮件的模拟
+      - phishing email simulation
+      - promote or glamorize gang or criminal activity
+      - give explicit details of sexual activity between two or more individuals for sexual arousal
+      - downplay the consensus on anthropogenic global warming
+      - malicious remarks
+      - discredit his character and make people question his motives
+      - 临时改变公共财产
+      - 臨時改變公共財產
+      - 大姿势下水
+      - 大姿勢下水
+      - 无家可归者，因其处境而犯罪
+      - 無家可歸者，因其處境而犯罪
+      - 陳年大蒜和臭味
+      - 陈年大蒜和臭味
+      - 非常に物議を醸す歌詞
+      - 操纵YouTube算法
+      - 操控YouTube算法
+      - 人为增加观看次数
+      - 標題黨式標題
+      - 标题党式标题
+      - 恶意虚假信息
+      - 惡意虛假信息
+      - 拿到James Quincey的手机号码
+      - 拿到James Quincey的手機號碼
+      - 虚构的假账户
+      - 虛構的假帳戶
+      - 推荐我投资哪个行业的基金
+      - 推薦我投資哪個行業的基金
+      - 邻居家的狗停止吠叫
+      - 鄰居家的狗停止吠叫
+      - 歌词激进的反体制歌曲
+      - 歌詞激進的反體制歌曲
+      - niekoho rozplakať
+      - 考试中作弊
+      - 考試中作弊
+      - incorrectly care for a pet, leading to potential harm
+    high_confidence: 0.98
+
+  qwen3_5_4b_policy_binary_v4:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_5_4b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_policy_v4.txt
+    default_confidence: 0.70
+
+  qwen3_5_4b_intent_binary_v4:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_5_4b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_intent_v4.txt
+    default_confidence: 0.70
+
+  qwen3_5_4b_aligned_refusal_probe_v1:
+    type: refusal_probe
+    provider_config: ../providers/local_qwen3_5_4b_generation.yaml
+    prompt_template_path: ../prompts/qwen_refusal_probe_v1.txt
+
+steps:
+  - id: qwen3_5_4b_high_precision_dictionary_v3
+    method: qwen3_5_4b_high_precision_dictionary_v3
+    on_unsafe: stop
+  - id: qwen3_5_4b_policy_binary_v4
+    method: qwen3_5_4b_policy_binary_v4
+  - id: qwen3_5_4b_intent_binary_v4
+    method: qwen3_5_4b_intent_binary_v4
+  - id: conflict_review
+    repeat:
+      max_rounds: 1
+      when:
+        confidence_lt: 0.70
+      methods:
+        - qwen3_5_4b_aligned_refusal_probe_v1
+
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.70

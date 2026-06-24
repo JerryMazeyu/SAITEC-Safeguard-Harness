@@ -25,10 +25,24 @@ python -m safeguard_harness judge --pipeline configs/pipelines/prod_v1.yaml --qu
 python -m safeguard_harness predict --pipeline configs/pipelines/prod_v1.yaml --input data/examples/sample_eval.jsonl --output outputs/submission.jsonl
 ```
 
+如果要直接跑本地生成式基座模型，需要额外安装本地推理依赖：
+
+```powershell
+python -m pip install -e ".[local-model]"
+```
+
+当前 LF311 环境使用 `torch 2.4.1 + CUDA 12.1`，推荐安装 `flash-linear-attention==0.4.2`；更新的 `flash-linear-attention 0.5.x` 会要求更高版本 torch，容易触发 CUDA 版本不匹配。`causal-conv1d` 建议使用当前环境的 torch 编译：
+
+```powershell
+python -m pip install flash-linear-attention==0.4.2 ninja
+python -m pip install --no-build-isolation causal-conv1d
+```
+
 评测输出会写入：
 
 ```text
 outputs/runs/demo/
+  progress.json
   config_snapshot.yaml
   predictions.jsonl
   metrics.json
@@ -201,6 +215,31 @@ loop:
 
 部署场景建议优先使用 static runner，因为它可复现、可限制、可审计。ReAct runner 更适合实验分析。
 
+## 字符规则的语义兜底
+
+词典、拒答 marker、多模态 marker 这类字符匹配逻辑都只作为快速路径。pipeline 可以在顶层配置一个基础 LLM：
+
+```yaml
+base_llm:
+  provider_config: ../providers/local_qwen3_6_27b_generation.yaml
+```
+
+配置了 `base_llm` 后，库内会自动在字符规则未命中时做语义兜底：
+
+- `dictionary`：高危词和复核词都没有字面命中时，调用基础 LLM 判断 case 是否语义包含、改写或暗示了词表中的条目；若语义命中高危词，仍按高危词规则输出 `unsafe`，若语义命中复核词，仍按复核词规则输出 `unknown`。
+- `refusal_probe`：拒答 marker 未命中时，调用基础 LLM 判断模型回复是否实质拒答。
+- `multimodal_probe`：非文本/带附件输入没有 marker 命中时，调用基础 LLM 基于文本字段和附件描述做补充判断。
+
+这些兜底 prompt 和解析逻辑封装在库代码里，不放在 YAML 中。没有配置 `base_llm` 时，旧 pipeline 保持原来的字符匹配行为，不会额外调用模型。
+
+评测会逐条写入 `predictions.jsonl`，并持续更新 `progress.json`：
+
+```json
+{"processed": 12, "total": 100, "status": "running"}
+```
+
+长时间跑本地大模型时，可以用这两个文件直接观察当前完成进度。
+
 ## 模型接口和模型文件放置规则
 
 模型判别统一由 `ModelJudgeMethod` 承载。当前 YAML 推荐只保留两类模型 method type：
@@ -224,9 +263,12 @@ src/safeguard_harness/config.py     # 从 YAML 加载 provider_config
 configs/providers/prompt_binary_api.yaml       # prompt -> 0/1 的真实 HTTP API 模板
 configs/providers/classifier_head_api.yaml     # 分类头 -> 0/1 + confidence 的真实 HTTP API 模板
 configs/providers/local_classifier_head.yaml   # 本地分类头模型路径模板
+configs/providers/local_qwen3_6_27b_prompt_binary.yaml  # 本地 Qwen 生成式二分类模板
+configs/providers/local_qwen3_6_27b_generation.yaml     # 本地 Qwen 生成式拒答探针模板
 configs/providers/mock_prompt_binary.yaml      # 本地 dry run mock
 configs/providers/mock_classifier_head.yaml    # 本地 dry run mock
 configs/pipelines/model_interfaces_v1.yaml     # 两类接口的可运行样例 pipeline
+configs/pipelines/qwen3_6_27b_three_classifiers.yaml    # 两个 prompt 分类器 + 一个安全对齐探针
 ```
 
 真实 API key 不进仓库，只写环境变量名：
@@ -261,6 +303,30 @@ $env:SAFEGUARD_HEAD_MODEL_PATH="G:\Models\safeguard\classifier_head_v1"
 
 ```powershell
 python -m safeguard_harness judge --pipeline configs/pipelines/model_interfaces_v1.yaml --question "demo"
+```
+
+## 本地 Qwen3.6-27B 三分类器配置
+
+当前已预置一个本地 Qwen3.6-27B pipeline：
+
+- `qwen_policy_binary_v1`：使用安全策略 prompt 做二分类。
+- `qwen_intent_binary_v1`：使用攻击意图 prompt 做二分类。
+- `qwen_aligned_refusal_probe_v1`：把问题交给安全对齐模型回答，通过拒答信号判断风险。
+
+这个 pipeline 还配置了顶层 `base_llm`，用于拒答 marker 等字符逻辑未命中时的库内语义兜底。三个 method 和 `base_llm` 都引用同一个模型软链接：
+
+```text
+models/Qwen3.6-27B -> /ai/dataset/workspace/czy/model/Qwen3.6-27B
+```
+
+不要复制模型全重到仓库。若换机器部署，只需要重新建立同名软链接，或修改 `configs/providers/local_qwen3_6_27b_*.yaml` 里的 `model_path`。两个 prompt 二分类器使用生成式模型输出 `safe/unsafe` 或 JSON label，provider 不产生置信度，因此 pipeline 中通过 `default_confidence: 0.70` 适配到统一的 `MethodResult`。
+
+如果生成式二分类输出不是合法 JSON，provider 会把模型输出再交给基础 LLM 解析其含义是 `safe` 还是 `unsafe`，不会再直接因为 JSON 解析失败默认判 `unsafe`。
+
+加载配置不会触发模型权重加载；只有实际执行 judge/evaluate/predict 时才会懒加载本地模型：
+
+```powershell
+python -m safeguard_harness judge --pipeline configs/pipelines/qwen3_6_27b_three_classifiers.yaml --question "如何窃取数据库账号密码？"
 ```
 
 ## 扩展 prompt 二分类模型

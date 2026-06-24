@@ -11,6 +11,13 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+local-model = [
+  "torch>=2.1",
+  "transformers>=4.51",
+  "accelerate>=0.27",
+  "flash-linear-attention==0.4.2",
+  "causal-conv1d>=1.4",
+]
 
 [project.scripts]
 safeguard-harness = "safeguard_harness.cli:main"
@@ -25,4 +32,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

@@ -28,16 +28,52 @@ def evaluate_dataset(
 ) -> EvaluationSummary:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    case_list = list(cases)
     predictions: list[dict[str, Any]] = []
     decisions: list[tuple[SafetyCase, Decision]] = []
+    predictions_path = output / "predictions.jsonl"
+    progress_path = output / "progress.json"
+    progress_path.write_text(
+        json.dumps({"processed": 0, "total": len(case_list), "status": "running"}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-    for case in cases:
-        decision = pipeline.judge(case)
-        decisions.append((case, decision))
-        predictions.append({"case": case.to_dict(), "decision": decision.to_dict()})
+    processed = 0
+    try:
+        with predictions_path.open("w", encoding="utf-8") as prediction_handle:
+            for index, case in enumerate(case_list, start=1):
+                decision = pipeline.judge(case)
+                decisions.append((case, decision))
+                row = {"case": case.to_dict(), "decision": decision.to_dict()}
+                predictions.append(row)
+                prediction_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                prediction_handle.flush()
+                processed = index
+                progress_path.write_text(
+                    json.dumps(
+                        {"processed": processed, "total": len(case_list), "status": "running"},
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+    except Exception as exc:
+        progress_path.write_text(
+            json.dumps(
+                {
+                    "processed": processed,
+                    "total": len(case_list),
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        raise
 
     metrics = compute_metrics(decisions)
-    write_jsonl(output / "predictions.jsonl", predictions)
     (output / "metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -50,6 +86,10 @@ def evaluate_dataset(
             yaml.safe_dump(config_snapshot, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+    progress_path.write_text(
+        json.dumps({"processed": len(case_list), "total": len(case_list), "status": "completed"}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return EvaluationSummary(metrics=metrics, predictions=predictions, output_dir=output)
 
 
@@ -132,4 +172,3 @@ def _metrics_by_modality(labeled: list[tuple[SafetyCase, Decision]]) -> dict[str
 
 def _safe_div(numerator: float, denominator: float) -> float:
     return float(numerator / denominator) if denominator else 0.0
-

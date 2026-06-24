@@ -5,23 +5,32 @@ from typing import Any
 
 import yaml
 
+from safeguard_harness.internal_llm import InternalLlmJudge
 from safeguard_harness.methods import (
+    DEFAULT_REFUSAL_MARKERS,
     DictionaryRuleMethod,
     ModelJudgeMethod,
     MockLlmProvider,
     MultimodalProbeMethod,
+    RegexRuleMethod,
     RefusalProbeMethod,
     coerce_terms,
 )
 from safeguard_harness.orchestration import ReactPipeline, StaticPipeline
-from safeguard_harness.providers import MockPromptBinaryProvider, build_binary_provider, load_provider_config
+from safeguard_harness.providers import (
+    MockPromptBinaryProvider,
+    build_binary_provider,
+    build_text_generation_provider,
+    load_provider_config,
+)
 
 
 def load_pipeline(path: str | Path) -> StaticPipeline | ReactPipeline:
     config_path = Path(path)
     raw_config = load_yaml(config_path)
+    semantic_fallback = build_base_llm_judge(raw_config.get("base_llm"), config_path.parent)
     methods = {
-        method_id: build_method(method_id, method_config, config_path.parent)
+        method_id: build_method(method_id, method_config, config_path.parent, semantic_fallback)
         for method_id, method_config in (raw_config.get("methods") or {}).items()
     }
     runner = raw_config.get("runner", "static")
@@ -38,27 +47,39 @@ def load_pipeline(path: str | Path) -> StaticPipeline | ReactPipeline:
     raise ValueError(f"unknown runner {runner!r}")
 
 
-def build_method(method_id: str, config: dict[str, Any], base_dir: Path):
+def build_method(
+    method_id: str,
+    config: dict[str, Any],
+    base_dir: Path,
+    semantic_fallback: InternalLlmJudge | None = None,
+):
     method_type = config.get("type")
     if method_type == "dictionary":
         return DictionaryRuleMethod(
             method_id=method_id,
             high_risk_terms=load_terms(config, "high_risk_terms", "high_risk_terms_path", base_dir),
+            safe_terms=load_terms(config, "safe_terms", "safe_terms_path", base_dir),
             review_terms=load_terms(config, "review_terms", "review_terms_path", base_dir),
             high_confidence=float(config.get("high_confidence", 0.98)),
+            safe_confidence=float(config.get("safe_confidence", 0.92)),
             review_confidence=float(config.get("review_confidence", 0.55)),
+            semantic_fallback=semantic_fallback,
+        )
+    if method_type == "regex_rules":
+        return RegexRuleMethod(
+            method_id=method_id,
+            unsafe_rules=list(config.get("unsafe_rules") or []),
+            safe_rules=list(config.get("safe_rules") or []),
+            unsafe_confidence=float(config.get("unsafe_confidence", 0.94)),
+            safe_confidence=float(config.get("safe_confidence", 0.94)),
         )
     if method_type == "refusal_probe":
-        return RefusalProbeMethod(
-            method_id=method_id,
-            provider=build_mock_provider(config),
-            prompt_template=load_prompt(config, base_dir),
-            refusal_markers=list(config.get("refusal_markers") or ["refusal", "cannot help", "unsafe request"]),
-        )
+        return build_refusal_probe_method(method_id, config, base_dir, semantic_fallback)
     if method_type == "multimodal_probe":
         return MultimodalProbeMethod(
             method_id=method_id,
             unsafe_attachment_markers=list(config.get("unsafe_attachment_markers") or []),
+            semantic_fallback=semantic_fallback,
         )
     if method_type in {"prompt_binary_model", "llm_safety"}:
         return build_prompt_binary_method(method_id, config, base_dir)
@@ -110,6 +131,28 @@ def build_mock_provider(config: dict[str, Any]) -> MockLlmProvider:
     )
 
 
+def build_refusal_probe_method(
+    method_id: str,
+    config: dict[str, Any],
+    base_dir: Path,
+    semantic_fallback: InternalLlmJudge | None = None,
+) -> RefusalProbeMethod:
+    if "provider_config" in config or "provider" in config:
+        provider = build_text_generation_provider_for_method(config, base_dir)
+    else:
+        provider = build_mock_provider(config)
+    return RefusalProbeMethod(
+        method_id=method_id,
+        provider=provider,
+        prompt_template=load_prompt(config, base_dir),
+        refusal_markers=list(config.get("refusal_markers") or DEFAULT_REFUSAL_MARKERS),
+        semantic_fallback=semantic_fallback,
+        response_parser=str(config.get("response_parser", "refusal_markers")),
+        unsafe_confidence=float(config.get("unsafe_confidence", 0.86)),
+        safe_confidence=float(config.get("safe_confidence", 0.65)),
+    )
+
+
 def build_prompt_binary_method(method_id: str, config: dict[str, Any], base_dir: Path) -> ModelJudgeMethod:
     return ModelJudgeMethod(
         method_id=method_id,
@@ -142,6 +185,39 @@ def build_provider_for_method(config: dict[str, Any], base_dir: Path):
     if not provider_config:
         raise ValueError("binary model methods require provider_config or provider")
     return build_binary_provider(provider_config)
+
+
+def build_text_generation_provider_for_method(config: dict[str, Any], base_dir: Path):
+    if "provider_config" in config:
+        provider_config = load_provider_config(resolve_path(config["provider_config"], base_dir))
+    else:
+        provider_config = dict(config.get("provider") or {})
+    if not provider_config:
+        raise ValueError("refusal probe methods require provider_config or provider when not using inline mock keywords")
+    return build_text_generation_provider(provider_config)
+
+
+def build_base_llm_judge(config: Any, base_dir: Path) -> InternalLlmJudge | None:
+    if not config:
+        return None
+    if not isinstance(config, dict):
+        raise TypeError("base_llm config must be a mapping")
+
+    if "provider_config" in config:
+        provider_config = load_provider_config(resolve_path(config["provider_config"], base_dir))
+    elif "provider" in config:
+        provider_config = dict(config["provider"] or {})
+    elif "type" in config:
+        provider_config = dict(config)
+    else:
+        raise ValueError("base_llm requires provider_config, provider, or inline provider type")
+
+    return InternalLlmJudge(
+        provider=build_text_generation_provider(provider_config),
+        safety_confidence=float(config.get("safety_confidence", 0.72)),
+        refusal_confidence=float(config.get("refusal_confidence", 0.78)),
+        dictionary_confidence=float(config.get("dictionary_confidence", 0.70)),
+    )
 
 
 def resolve_path(value: str | Path, base_dir: Path) -> Path:

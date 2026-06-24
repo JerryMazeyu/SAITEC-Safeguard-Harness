@@ -1,0 +1,35 @@
+name: qwen3_6_27b_three_classifiers
+runner: static
+
+base_llm:
+  provider_config: ../providers/local_qwen3_6_27b_generation.yaml
+
+methods:
+  qwen_policy_binary_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_6_27b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_policy_v1.txt
+    default_confidence: 0.70
+
+  qwen_intent_binary_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_6_27b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_intent_v1.txt
+    default_confidence: 0.70
+
+  qwen_aligned_refusal_probe_v1:
+    type: refusal_probe
+    provider_config: ../providers/local_qwen3_6_27b_generation.yaml
+    prompt_template_path: ../prompts/qwen_refusal_probe_v1.txt
+
+steps:
+  - id: qwen_policy_binary_v1
+    method: qwen_policy_binary_v1
+  - id: qwen_intent_binary_v1
+    method: qwen_intent_binary_v1
+  - id: qwen_aligned_refusal_probe_v1
+    method: qwen_aligned_refusal_probe_v1
+
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.60

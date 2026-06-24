@@ -1,0 +1,20 @@
+type: local_text_generation_lm
+description: "Local Qwen3.5-4B generative model used by refusal probes and internal fallback judges."
+model_path: ../../models/Qwen3.5-4B
+trust_remote_code: true
+device_map: auto
+torch_dtype: auto
+max_memory:
+  0: 3GiB
+  1: 3GiB
+  2: 3GiB
+  3: 3GiB
+  cpu: 64GiB
+offload_folder: ../../outputs/model_offload/qwen3_5_4b
+use_chat_template: true
+enable_thinking: false
+disable_torch_compile: true
+patch_torch_distributed_tensor: true
+do_sample: false
+max_new_tokens: 96
+cache_model: true

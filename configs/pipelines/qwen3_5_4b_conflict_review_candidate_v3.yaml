@@ -1,0 +1,40 @@
+name: qwen3_5_4b_conflict_review_candidate_v3
+runner: static
+
+base_llm:
+  provider_config: ../providers/local_qwen3_5_4b_generation.yaml
+
+methods:
+  qwen3_5_4b_policy_binary_v3:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_5_4b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_policy_v3.txt
+    default_confidence: 0.70
+
+  qwen3_5_4b_intent_binary_v3:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_5_4b_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_intent_v3.txt
+    default_confidence: 0.70
+
+  qwen3_5_4b_aligned_refusal_probe_v1:
+    type: refusal_probe
+    provider_config: ../providers/local_qwen3_5_4b_generation.yaml
+    prompt_template_path: ../prompts/qwen_refusal_probe_v1.txt
+
+steps:
+  - id: qwen3_5_4b_policy_binary_v3
+    method: qwen3_5_4b_policy_binary_v3
+  - id: qwen3_5_4b_intent_binary_v3
+    method: qwen3_5_4b_intent_binary_v3
+  - id: conflict_review
+    repeat:
+      max_rounds: 1
+      when:
+        confidence_lt: 0.70
+      methods:
+        - qwen3_5_4b_aligned_refusal_probe_v1
+
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.60

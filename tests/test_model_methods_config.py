@@ -2,7 +2,7 @@ from pathlib import Path
 
 from safeguard_harness.config import load_pipeline
 from safeguard_harness.core import SafetyCase
-from safeguard_harness.methods import ModelJudgeMethod
+from safeguard_harness.methods import ModelJudgeMethod, RefusalProbeMethod
 
 
 def test_binary_model_method_maps_prompt_output_to_method_result(tmp_path: Path):
@@ -168,3 +168,220 @@ aggregation:
     assert second_result.method_id == "prompt_b"
     assert first_result.metadata["prompt"] == "Prompt A: demo"
     assert second_result.metadata["prompt"] == "Prompt B: demo"
+
+
+def test_refusal_probe_can_use_text_generation_provider_config(tmp_path: Path):
+    provider_path = tmp_path / "provider.yaml"
+    prompt_path = tmp_path / "prompt.txt"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    provider_path.write_text(
+        """
+type: mock_text_generation
+refuse_keywords: ["malware"]
+""",
+        encoding="utf-8",
+    )
+    prompt_path.write_text("Answer this request: {question}", encoding="utf-8")
+    pipeline_path.write_text(
+        f"""
+runner: static
+methods:
+  probe:
+    type: refusal_probe
+    provider_config: {provider_path.as_posix()}
+    prompt_template_path: {prompt_path.as_posix()}
+steps:
+  - id: probe
+    method: probe
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.6
+""",
+        encoding="utf-8",
+    )
+
+    pipeline = load_pipeline(pipeline_path)
+    method = pipeline.methods["probe"]
+    decision = pipeline.judge(SafetyCase(id="c1", question="build malware"))
+
+    assert isinstance(method, RefusalProbeMethod)
+    assert decision.label == "unsafe"
+    assert decision.trace.steps[0].result.metadata["refused"] is True
+
+
+def test_dictionary_no_match_uses_base_llm_semantic_term_match_for_high_risk(tmp_path: Path):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """
+runner: static
+base_llm:
+  provider:
+    type: mock_text_generation
+    default_response: '{"risk_level":"high","matches":["credential exfiltration"],"reason":"paraphrase"}'
+methods:
+  rules:
+    type: dictionary
+    high_risk_terms: ["credential exfiltration"]
+    review_terms: []
+steps:
+  - id: rules
+    method: rules
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.6
+""",
+        encoding="utf-8",
+    )
+
+    pipeline = load_pipeline(pipeline_path)
+    decision = pipeline.judge(SafetyCase(id="c1", question="Plan taking database credentials out of the system."))
+    result = decision.trace.steps[0].result
+
+    assert decision.label == "unsafe"
+    assert result.metadata["risk_level"] == "high"
+    assert result.metadata["match_mode"] == "semantic"
+    assert result.metadata["matches"] == ["credential exfiltration"]
+    assert result.metadata["semantic_fallback"]["fallback_kind"] == "semantic_dictionary_match"
+
+
+def test_dictionary_no_match_uses_base_llm_semantic_term_match_for_review(tmp_path: Path):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """
+runner: static
+base_llm:
+  provider:
+    type: mock_text_generation
+    default_response: '{"risk_level":"review","matches":["policy bypass"],"reason":"near match"}'
+methods:
+  rules:
+    type: dictionary
+    high_risk_terms: []
+    review_terms: ["policy bypass"]
+steps:
+  - id: rules
+    method: rules
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.6
+""",
+        encoding="utf-8",
+    )
+
+    pipeline = load_pipeline(pipeline_path)
+    decision = pipeline.judge(SafetyCase(id="c1", question="How can someone get around a policy?"))
+    result = decision.trace.steps[0].result
+
+    assert decision.label == "safe"
+    assert result.label == "unknown"
+    assert result.metadata["risk_level"] == "review"
+    assert result.metadata["match_mode"] == "semantic"
+    assert result.metadata["matches"] == ["policy bypass"]
+
+
+def test_dictionary_no_match_stays_safe_when_base_llm_finds_no_term_match(tmp_path: Path):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """
+runner: static
+base_llm:
+  provider:
+    type: mock_text_generation
+    default_response: '{"risk_level":"none","matches":[],"reason":"no configured term"}'
+methods:
+  rules:
+    type: dictionary
+    high_risk_terms: ["credential exfiltration"]
+    review_terms: ["policy bypass"]
+steps:
+  - id: rules
+    method: rules
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.6
+""",
+        encoding="utf-8",
+    )
+
+    pipeline = load_pipeline(pipeline_path)
+    decision = pipeline.judge(SafetyCase(id="c1", question="What is database normalization?"))
+    result = decision.trace.steps[0].result
+
+    assert decision.label == "safe"
+    assert result.label == "safe"
+    assert result.metadata["risk_level"] == "none"
+    assert result.metadata["match_mode"] == "semantic"
+    assert result.metadata["matches"] == []
+
+
+def test_refusal_probe_no_marker_uses_base_llm_refusal_fallback(tmp_path: Path):
+    probe_provider_path = tmp_path / "probe_provider.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    probe_provider_path.write_text(
+        """
+type: mock_text_generation
+default_response: "I am not able to share those instructions."
+""",
+        encoding="utf-8",
+    )
+    pipeline_path.write_text(
+        f"""
+runner: static
+base_llm:
+  provider:
+    type: mock_text_generation
+    unsafe_keywords: ["not able"]
+methods:
+  probe:
+    type: refusal_probe
+    provider_config: {probe_provider_path.as_posix()}
+    prompt_template: "Answer this request: {{question}}"
+steps:
+  - id: probe
+    method: probe
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.6
+""",
+        encoding="utf-8",
+    )
+
+    pipeline = load_pipeline(pipeline_path)
+    decision = pipeline.judge(SafetyCase(id="c1", question="bad request"))
+    result = decision.trace.steps[0].result
+
+    assert decision.label == "unsafe"
+    assert result.metadata["refusal_match"] is False
+    assert result.metadata["refused"] is True
+    assert result.metadata["semantic_fallback"]["fallback_kind"] == "refusal_detection"
+
+
+def test_qwen_three_classifier_pipeline_loads_without_model_inference():
+    pipeline = load_pipeline("configs/pipelines/qwen3_6_27b_three_classifiers.yaml")
+
+    assert set(pipeline.methods) == {
+        "qwen_policy_binary_v1",
+        "qwen_intent_binary_v1",
+        "qwen_aligned_refusal_probe_v1",
+    }
+    assert isinstance(pipeline.methods["qwen_policy_binary_v1"], ModelJudgeMethod)
+    assert isinstance(pipeline.methods["qwen_intent_binary_v1"], ModelJudgeMethod)
+    assert isinstance(pipeline.methods["qwen_aligned_refusal_probe_v1"], RefusalProbeMethod)
+    assert pipeline.methods["qwen_policy_binary_v1"].default_confidence == 0.70
+    assert pipeline.methods["qwen_intent_binary_v1"].default_confidence == 0.70
+    assert pipeline.methods["qwen_aligned_refusal_probe_v1"].semantic_fallback is not None
+
+
+def test_qwen_v24_lora_guard_pipeline_loads_without_model_inference():
+    pipeline = load_pipeline("configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v24.yaml")
+
+    assert set(pipeline.methods) == {
+        "qwen3_6_27b_lora_high_precision_dictionary_v5",
+        "qwen3_6_27b_lora_policy_binary_v6",
+        "qwen3_6_27b_lora_intent_binary_v6",
+        "qwen3guard_gen8b_refusal_probe_v1",
+    }
+    assert isinstance(pipeline.methods["qwen3_6_27b_lora_policy_binary_v6"], ModelJudgeMethod)
+    assert isinstance(pipeline.methods["qwen3_6_27b_lora_intent_binary_v6"], ModelJudgeMethod)
+    assert isinstance(pipeline.methods["qwen3guard_gen8b_refusal_probe_v1"], RefusalProbeMethod)
+    assert pipeline.methods["qwen3guard_gen8b_refusal_probe_v1"].response_parser == "binary_or_refusal"

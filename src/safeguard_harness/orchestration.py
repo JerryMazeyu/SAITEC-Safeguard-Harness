@@ -19,7 +19,12 @@ class Pipeline:
 
     def aggregate(self, case_id: str, trace: RunTrace) -> Decision:
         threshold = float(self.aggregation.get("unsafe_threshold", 0.5))
-        results = [step.result for step in trace.steps if not step.result.skipped]
+        strategy = str(self.aggregation.get("strategy", "max"))
+        results = [
+            step.result
+            for step in trace.steps
+            if not step.result.skipped and step.metadata.get("include_in_aggregation", True) is not False
+        ]
         if not results:
             return Decision(
                 case_id=case_id,
@@ -30,12 +35,17 @@ class Pipeline:
                 trace=trace,
             )
 
-        unsafe_score = max(result.unsafe_score for result in results)
-        unsafe_results = [result for result in results if result.label == UNSAFE]
-        if unsafe_results:
-            confidence = max(result.confidence for result in unsafe_results)
+        if strategy == "weighted_vote":
+            unsafe_score, confidence = _weighted_vote_score(results)
+        elif strategy in {"max", "max_unsafe_score"}:
+            unsafe_score = max(result.unsafe_score for result in results)
+            unsafe_results = [result for result in results if result.label == UNSAFE]
+            if unsafe_results:
+                confidence = max(result.confidence for result in unsafe_results)
+            else:
+                confidence = sum(result.confidence for result in results) / len(results)
         else:
-            confidence = sum(result.confidence for result in results) / len(results)
+            raise ValueError(f"unknown aggregation strategy: {strategy!r}")
         label = UNSAFE if unsafe_score >= threshold else SAFE
         reasons = [
             evidence
@@ -52,6 +62,7 @@ class Pipeline:
             confidence=confidence,
             reasons=reasons,
             trace=trace,
+            metadata={"aggregation_strategy": strategy},
         )
 
 
@@ -65,14 +76,19 @@ class StaticPipeline(Pipeline):
         for step in self.steps:
             if "method" in step:
                 result = self._run_method(step["method"], case, context)
+                step_metadata = _step_trace_metadata(step)
                 trace.add_step(
                     TraceStep(
                         step_id=str(step.get("id") or step["method"]),
                         method_id=step["method"],
                         result=result,
+                        metadata=step_metadata,
                     )
                 )
-                if result.label == UNSAFE and step.get("on_unsafe") == "stop":
+                step_id = str(step.get("id") or step["method"])
+                if result.label == UNSAFE and step.get("on_unsafe") == "stop" and _metadata_matches(
+                    result.metadata, step.get("on_unsafe_metadata")
+                ):
                     trace.stop_reason = f"short_circuit:{step.get('id') or step['method']}"
                     return Decision(
                         case_id=case.id,
@@ -80,6 +96,18 @@ class StaticPipeline(Pipeline):
                         unsafe_score=result.unsafe_score,
                         confidence=result.confidence,
                         reasons=list(result.evidence),
+                        trace=trace,
+                    )
+                if result.label == SAFE and step.get("on_safe") == "stop" and _metadata_matches(
+                    result.metadata, step.get("on_safe_metadata")
+                ):
+                    trace.stop_reason = f"short_circuit:{step_id}"
+                    return Decision(
+                        case_id=case.id,
+                        label=SAFE,
+                        unsafe_score=result.unsafe_score,
+                        confidence=result.confidence,
+                        reasons=list(result.evidence) or ["safe short-circuit"],
                         trace=trace,
                     )
                 continue
@@ -176,6 +204,28 @@ def _should_repeat(decision: Decision, when: dict[str, Any]) -> bool:
     return bool(when)
 
 
+def _step_trace_metadata(step: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if step.get("include_in_aggregation") is False:
+        metadata["include_in_aggregation"] = False
+    return metadata
+
+
+def _metadata_matches(metadata: dict[str, Any], expected: Any) -> bool:
+    if not expected:
+        return True
+    if not isinstance(expected, dict):
+        raise TypeError("short-circuit metadata filters must be mappings")
+    for key, expected_value in expected.items():
+        actual_value = metadata.get(str(key))
+        if isinstance(expected_value, list):
+            if actual_value not in expected_value:
+                return False
+        elif actual_value != expected_value:
+            return False
+    return True
+
+
 def _stop_condition_met(decision: Decision, stop_when: dict[str, Any]) -> bool:
     if not stop_when:
         return False
@@ -185,3 +235,29 @@ def _stop_condition_met(decision: Decision, stop_when: dict[str, Any]) -> bool:
         return True
     return False
 
+
+def _weighted_vote_score(results: list[MethodResult]) -> tuple[float, float]:
+    has_explicit_unsafe = any(result.label == UNSAFE for result in results)
+    unsafe_weight = 0.0
+    safe_weight = 0.0
+    neutral_weight = 0.0
+    for result in results:
+        weight = max(result.confidence, 0.0)
+        if weight == 0.0:
+            continue
+        if result.label == UNSAFE or (has_explicit_unsafe and result.label != SAFE and result.unsafe_score > 0.5):
+            unsafe_weight += weight
+        elif result.label == SAFE:
+            safe_weight += weight
+        else:
+            neutral_weight += weight
+
+    total_weight = unsafe_weight + safe_weight
+    if total_weight == 0.0:
+        unsafe_score = sum(result.unsafe_score for result in results) / len(results)
+        confidence = sum(result.confidence for result in results) / len(results)
+        return unsafe_score, confidence
+
+    unsafe_score = unsafe_weight / total_weight
+    confidence = max(unsafe_weight, safe_weight) / (total_weight + neutral_weight)
+    return unsafe_score, confidence
