@@ -47,8 +47,8 @@ def test_evaluate_dataset_writes_metrics_predictions_and_error_slices(tmp_path: 
         "\n".join(
             [
                 json.dumps({"id": "safe", "question": "hello", "label": "safe"}),
-                json.dumps({"id": "unsafe", "question": "steal token now", "label": "unsafe"}),
-                json.dumps({"id": "review", "question": "bypass this", "label": "unsafe"}),
+                json.dumps({"id": 2, "question": "steal token now", "label": "unsafe"}),
+                json.dumps({"id": 3, "question": "bypass this", "label": "unsafe"}),
             ]
         )
         + "\n",
@@ -65,6 +65,15 @@ def test_evaluate_dataset_writes_metrics_predictions_and_error_slices(tmp_path: 
     assert (output_dir / "report.md").exists()
     assert (output_dir / "errors_false_positive.jsonl").exists()
     assert (output_dir / "errors_false_negative.jsonl").exists()
+    deliverable_rows = [
+        json.loads(line)
+        for line in (output_dir / "deliverable.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert deliverable_rows == [
+        {"id": "safe", "result": 0},
+        {"id": 2, "result": 1},
+        {"id": 3, "result": 1},
+    ]
 
 
 def test_evaluate_dataset_streams_predictions_and_progress(tmp_path: Path):
@@ -98,6 +107,7 @@ def test_evaluate_dataset_streams_predictions_and_progress(tmp_path: Path):
     evaluate_dataset(ObservingPipeline(), cases, output_dir)
 
     assert (output_dir / "predictions.jsonl").read_text(encoding="utf-8").count("\n") == 2
+    assert (output_dir / "deliverable.jsonl").read_text(encoding="utf-8").count("\n") == 2
     progress = json.loads((output_dir / "progress.json").read_text(encoding="utf-8"))
     assert progress == {"processed": 2, "total": 2, "status": "completed"}
 
@@ -144,12 +154,13 @@ def test_evaluate_dataset_marks_progress_failed_on_exception(tmp_path: Path):
 
 def test_cli_judge_predict_and_evaluate_commands(tmp_path: Path):
     pipeline_path = tmp_path / "pipeline.yaml"
-    dataset_path = tmp_path / "cases.jsonl"
+    dataset_path = tmp_path / "cases.json"
     predictions_path = tmp_path / "predictions.jsonl"
+    deliverable_path = tmp_path / "submission.jsonl"
     run_dir = tmp_path / "eval"
     write_pipeline(pipeline_path)
     dataset_path.write_text(
-        json.dumps({"id": "c1", "question": "steal token", "label": "unsafe"}) + "\n",
+        json.dumps([{"id": 1, "question": "steal token", "label": "unsafe"}]),
         encoding="utf-8",
     )
     env = {
@@ -185,6 +196,8 @@ def test_cli_judge_predict_and_evaluate_commands(tmp_path: Path):
             str(dataset_path),
             "--output",
             str(predictions_path),
+            "--deliverable-output",
+            str(deliverable_path),
         ],
         check=True,
         capture_output=True,
@@ -212,6 +225,10 @@ def test_cli_judge_predict_and_evaluate_commands(tmp_path: Path):
 
     assert json.loads(judge.stdout)["label"] == "unsafe"
     assert predictions_path.exists()
+    assert [json.loads(line) for line in deliverable_path.read_text(encoding="utf-8").splitlines()] == [
+        {"id": 1, "result": 1}
+    ]
     assert "wrote" in predict.stdout.lower()
     assert (run_dir / "metrics.json").exists()
+    assert (run_dir / "deliverable.jsonl").exists()
     assert "accuracy" in evaluate.stdout.lower()

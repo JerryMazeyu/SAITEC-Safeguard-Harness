@@ -58,6 +58,33 @@ class JudgeMethod(ABC):
         raise NotImplementedError
 
 
+def case_text_for_view(case: SafetyCase, input_view: str = "full") -> str:
+    view = input_view.casefold()
+    if view in {"full", "case", "question_answer"}:
+        return case.text_for_judging()
+    if view in {"question", "prompt", "user"}:
+        return case.question
+    if view in {"answer", "output", "response", "assistant"}:
+        return case.answer or ""
+    if view in {"answer_if_present", "output_if_present", "response_if_present"}:
+        return case.answer or case.question
+    raise ValueError(f"unknown input_view: {input_view!r}")
+
+
+def case_for_view(case: SafetyCase, input_view: str = "full") -> SafetyCase:
+    if input_view.casefold() in {"full", "case", "question_answer"}:
+        return case
+    return SafetyCase(
+        id=case.id,
+        question=case_text_for_view(case, input_view),
+        answer=None,
+        label=case.label,
+        modality=case.modality,
+        attachments=list(case.attachments),
+        metadata={**case.metadata, "input_view": input_view},
+    )
+
+
 class FuzzyMatcher(ABC):
     @abstractmethod
     def find_matches(self, text: str, terms: list[str]) -> list[str]:
@@ -81,18 +108,34 @@ class DictionaryRuleMethod(JudgeMethod):
     safe_confidence: float = 0.92
     review_confidence: float = 0.55
     semantic_fallback: InternalLlmJudge | None = None
+    input_view: str = "full"
+    bypass_unsafe_on_refusal: bool = False
 
     def judge(self, case: SafetyCase, context: RunContext | None = None) -> MethodResult:
-        text = case.text_for_judging()
+        text = case_text_for_view(case, self.input_view)
         high_matches = self.matcher.find_matches(text, self.high_risk_terms)
         if high_matches:
+            if self.bypass_unsafe_on_refusal and detect_refusal(text):
+                return MethodResult(
+                    method_id=self.method_id,
+                    label=UNKNOWN,
+                    unsafe_score=0.0,
+                    confidence=0.0,
+                    evidence=["high-risk dictionary match bypassed for refusal output"],
+                    metadata={
+                        "risk_level": "bypassed_refusal",
+                        "matches": high_matches,
+                        "input_view": self.input_view,
+                    },
+                    skipped=True,
+                )
             return MethodResult(
                 method_id=self.method_id,
                 label=UNSAFE,
                 unsafe_score=1.0,
                 confidence=self.high_confidence,
                 evidence=[f"high-risk dictionary match: {term}" for term in high_matches],
-                metadata={"risk_level": "high", "matches": high_matches},
+                metadata={"risk_level": "high", "matches": high_matches, "input_view": self.input_view},
             )
 
         safe_matches = self.matcher.find_matches(text, self.safe_terms)
@@ -103,7 +146,7 @@ class DictionaryRuleMethod(JudgeMethod):
                 unsafe_score=0.0,
                 confidence=self.safe_confidence,
                 evidence=[f"safe dictionary match: {term}" for term in safe_matches],
-                metadata={"risk_level": "safe", "matches": safe_matches},
+                metadata={"risk_level": "safe", "matches": safe_matches, "input_view": self.input_view},
             )
 
         review_matches = self.matcher.find_matches(text, self.review_terms)
@@ -114,12 +157,12 @@ class DictionaryRuleMethod(JudgeMethod):
                 unsafe_score=0.55,
                 confidence=self.review_confidence,
                 evidence=[f"review dictionary match: {term}" for term in review_matches],
-                metadata={"risk_level": "review", "matches": review_matches},
+                metadata={"risk_level": "review", "matches": review_matches, "input_view": self.input_view},
             )
 
         if self.semantic_fallback is not None:
             fallback = self.semantic_fallback.judge_dictionary_terms(
-                case=case,
+                case=case_for_view(case, self.input_view),
                 high_terms=self.high_risk_terms,
                 review_terms=self.review_terms,
                 context=context,
@@ -135,6 +178,7 @@ class DictionaryRuleMethod(JudgeMethod):
                         "risk_level": "high",
                         "matches": fallback.matches,
                         "match_mode": "semantic",
+                        "input_view": self.input_view,
                         "semantic_fallback": fallback.metadata,
                     },
                 )
@@ -149,6 +193,7 @@ class DictionaryRuleMethod(JudgeMethod):
                         "risk_level": "review",
                         "matches": fallback.matches,
                         "match_mode": "semantic",
+                        "input_view": self.input_view,
                         "semantic_fallback": fallback.metadata,
                     },
                 )
@@ -163,6 +208,7 @@ class DictionaryRuleMethod(JudgeMethod):
                         "risk_level": "none",
                         "matches": [],
                         "match_mode": "semantic",
+                        "input_view": self.input_view,
                         "semantic_fallback": fallback.metadata,
                     },
                 )
@@ -176,6 +222,7 @@ class DictionaryRuleMethod(JudgeMethod):
                     "risk_level": "unknown",
                     "matches": [],
                     "match_mode": "semantic",
+                    "input_view": self.input_view,
                     "semantic_fallback": fallback.metadata,
                 },
             )
@@ -186,7 +233,7 @@ class DictionaryRuleMethod(JudgeMethod):
             unsafe_score=0.0,
             confidence=0.45,
             evidence=["no dictionary match"],
-            metadata={"risk_level": "none", "matches": []},
+            metadata={"risk_level": "none", "matches": [], "input_view": self.input_view},
         )
 
 
@@ -197,20 +244,36 @@ class RegexRuleMethod(JudgeMethod):
     safe_rules: list[dict[str, Any]] = field(default_factory=list)
     unsafe_confidence: float = 0.94
     safe_confidence: float = 0.94
+    input_view: str = "full"
+    bypass_unsafe_on_refusal: bool = False
 
     def judge(self, case: SafetyCase, context: RunContext | None = None) -> MethodResult:
         del context
-        text = case.text_for_judging()
+        text = case_text_for_view(case, self.input_view)
         unsafe_match = self._first_match(text, self.unsafe_rules)
         if unsafe_match is not None:
             rule_id, confidence = unsafe_match
+            if self.bypass_unsafe_on_refusal and detect_refusal(text):
+                return MethodResult(
+                    method_id=self.method_id,
+                    label=UNKNOWN,
+                    unsafe_score=0.0,
+                    confidence=0.0,
+                    evidence=[f"unsafe regex rule match bypassed for refusal output: {rule_id}"],
+                    metadata={
+                        "risk_level": "bypassed_refusal",
+                        "rule_id": rule_id,
+                        "input_view": self.input_view,
+                    },
+                    skipped=True,
+                )
             return MethodResult(
                 method_id=self.method_id,
                 label=UNSAFE,
                 unsafe_score=1.0,
                 confidence=confidence,
                 evidence=[f"unsafe regex rule match: {rule_id}"],
-                metadata={"risk_level": "regex_unsafe", "rule_id": rule_id},
+                metadata={"risk_level": "regex_unsafe", "rule_id": rule_id, "input_view": self.input_view},
             )
 
         safe_match = self._first_match(text, self.safe_rules)
@@ -222,7 +285,7 @@ class RegexRuleMethod(JudgeMethod):
                 unsafe_score=0.0,
                 confidence=confidence,
                 evidence=[f"safe regex rule match: {rule_id}"],
-                metadata={"risk_level": "regex_safe", "rule_id": rule_id},
+                metadata={"risk_level": "regex_safe", "rule_id": rule_id, "input_view": self.input_view},
             )
 
         return MethodResult(
@@ -231,7 +294,7 @@ class RegexRuleMethod(JudgeMethod):
             unsafe_score=0.0,
             confidence=0.0,
             evidence=["no regex rule match"],
-            metadata={"risk_level": "none"},
+            metadata={"risk_level": "none", "input_view": self.input_view},
             skipped=True,
         )
 
@@ -274,9 +337,10 @@ class RefusalProbeMethod(JudgeMethod):
     response_parser: str = "refusal_markers"
     unsafe_confidence: float = 0.86
     safe_confidence: float = 0.65
+    input_view: str = "full"
 
     def judge(self, case: SafetyCase, context: RunContext | None = None) -> MethodResult:
-        prompt = render_prompt(self.prompt_template, case)
+        prompt = render_prompt(self.prompt_template, case, input_view=self.input_view)
         response = self.provider.complete(prompt)
         if context is not None:
             context.count_llm_call()
@@ -296,6 +360,7 @@ class RefusalProbeMethod(JudgeMethod):
                         metadata={
                             "prompt": prompt,
                             "response": response,
+                            "input_view": self.input_view,
                             "response_parser": self.response_parser,
                             "parse_error": binary_parse_error,
                         },
@@ -319,6 +384,7 @@ class RefusalProbeMethod(JudgeMethod):
                     "response": response,
                     "refused": fallback.label == UNSAFE,
                     "refusal_match": False,
+                    "input_view": self.input_view,
                     "response_parser": self.response_parser,
                     "binary_parse_error": binary_parse_error,
                     "semantic_fallback": fallback.metadata,
@@ -335,6 +401,7 @@ class RefusalProbeMethod(JudgeMethod):
                 "response": response,
                 "refused": refused,
                 "refusal_match": refused,
+                "input_view": self.input_view,
                 "response_parser": self.response_parser,
                 "binary_parse_error": binary_parse_error,
             },
@@ -355,6 +422,7 @@ class RefusalProbeMethod(JudgeMethod):
                 "response": response,
                 "refused": is_unsafe,
                 "refusal_match": False,
+                "input_view": self.input_view,
                 "response_parser": self.response_parser,
                 "binary_label": binary_label,
             },
@@ -365,10 +433,12 @@ class RefusalProbeMethod(JudgeMethod):
 class MultimodalProbeMethod(JudgeMethod):
     method_id: str
     unsafe_attachment_markers: list[str] = field(default_factory=list)
+    provider: Any | None = None
     semantic_fallback: InternalLlmJudge | None = None
+    default_confidence: float = 0.8
 
     def judge(self, case: SafetyCase, context: RunContext | None = None) -> MethodResult:
-        if case.modality == "text" and not case.attachments:
+        if not case.has_image():
             return MethodResult(
                 method_id=self.method_id,
                 label=UNKNOWN,
@@ -377,6 +447,17 @@ class MultimodalProbeMethod(JudgeMethod):
                 evidence=["multimodal probe skipped for text-only case"],
                 metadata={"skipped_reason": "text_only"},
                 skipped=True,
+            )
+
+        if self.provider is not None:
+            output = self.provider.classify_case(case)
+            return binary_output_to_method_result(
+                method_id=self.method_id,
+                provider_kind="multimodal_probe",
+                output=output,
+                default_confidence=self.default_confidence,
+                input_mode="case",
+                output_parser="binary",
             )
 
         attachment_text = " ".join(case.attachments).casefold()
@@ -415,6 +496,118 @@ class MultimodalProbeMethod(JudgeMethod):
 
 
 @dataclass
+class ImageProbeReviewMethod(JudgeMethod):
+    method_id: str
+    provider: Any
+    default_confidence: float = 0.8
+    safe_review_rules: list[dict[str, Any]] = field(default_factory=list)
+    unsafe_review_rules: list[dict[str, Any]] = field(default_factory=list)
+    safe_review_confidence: float = 0.88
+    review_input_view: str = "full"
+    skip_when_answer_present: bool = False
+
+    def judge(self, case: SafetyCase, context: RunContext | None = None) -> MethodResult:
+        del context
+        if self.skip_when_answer_present and case.answer:
+            return MethodResult(
+                method_id=self.method_id,
+                label=UNKNOWN,
+                unsafe_score=0.0,
+                confidence=0.0,
+                evidence=["image probe review skipped for output-side case"],
+                metadata={"skipped_reason": "answer_present", "review_input_view": self.review_input_view},
+                skipped=True,
+            )
+        if not case.has_image():
+            return MethodResult(
+                method_id=self.method_id,
+                label=UNKNOWN,
+                unsafe_score=0.0,
+                confidence=0.0,
+                evidence=["image probe review skipped for text-only case"],
+                metadata={"skipped_reason": "text_only"},
+                skipped=True,
+            )
+
+        output = self.provider.classify_case(case)
+        probe_result = binary_output_to_method_result(
+            method_id=self.method_id,
+            provider_kind="image_probe_review",
+            output=output,
+            default_confidence=self.default_confidence,
+            input_mode="case",
+            output_parser="binary",
+        )
+        metadata = {
+            **probe_result.metadata,
+            "probe_label": probe_result.label,
+            "probe_unsafe_score": probe_result.unsafe_score,
+            "probe_confidence": probe_result.confidence,
+        }
+        if probe_result.label == SAFE:
+            metadata["review_route"] = "probe_safe"
+            return MethodResult(
+                method_id=self.method_id,
+                label=SAFE,
+                unsafe_score=probe_result.unsafe_score,
+                confidence=probe_result.confidence,
+                evidence=list(probe_result.evidence),
+                metadata=metadata,
+            )
+
+        question_text = case_text_for_view(case, self.review_input_view)
+        unsafe_rule = _first_regex_rule_match(question_text, self.unsafe_review_rules)
+        if unsafe_rule is not None:
+            rule_id, rule_confidence = unsafe_rule
+            metadata.update(
+                {
+                    "review_route": "unsafe_prompt_rule",
+                    "review_rule_id": rule_id,
+                    "review_input_view": self.review_input_view,
+                }
+            )
+            confidence = max(probe_result.confidence, rule_confidence)
+            return MethodResult(
+                method_id=self.method_id,
+                label=UNSAFE,
+                unsafe_score=max(probe_result.unsafe_score, confidence),
+                confidence=confidence,
+                evidence=[*probe_result.evidence, f"unsafe image prompt review rule match: {rule_id}"],
+                metadata=metadata,
+            )
+
+        safe_rule = _first_regex_rule_match(question_text, self.safe_review_rules)
+        if safe_rule is not None:
+            rule_id, rule_confidence = safe_rule
+            confidence = rule_confidence or self.safe_review_confidence
+            metadata.update(
+                {
+                    "review_route": "safe_prompt_override",
+                    "review_rule_id": rule_id,
+                    "review_input_view": self.review_input_view,
+                }
+            )
+            return MethodResult(
+                method_id=self.method_id,
+                label=SAFE,
+                unsafe_score=1.0 - confidence,
+                confidence=confidence,
+                evidence=[*probe_result.evidence, f"benign image prompt review rule match: {rule_id}"],
+                metadata=metadata,
+            )
+
+        metadata.update({"review_route": "probe_unsafe", "review_input_view": self.review_input_view})
+        return MethodResult(
+            method_id=self.method_id,
+            label=UNSAFE,
+            unsafe_score=probe_result.unsafe_score,
+            confidence=probe_result.confidence,
+            evidence=list(probe_result.evidence),
+            metadata=metadata,
+        )
+
+
+@dataclass
 class ModelJudgeMethod(JudgeMethod):
     method_id: str
     provider: Any
@@ -423,6 +616,7 @@ class ModelJudgeMethod(JudgeMethod):
     provider_kind: str = "model"
     prompt_template: str | None = None
     default_confidence: float = 0.8
+    input_view: str = "full"
 
     def judge(self, case: SafetyCase, context: RunContext | None = None) -> MethodResult:
         if self.output_parser == "binary":
@@ -451,14 +645,15 @@ class ModelJudgeMethod(JudgeMethod):
     def _render_required_prompt(self, case: SafetyCase) -> str:
         if self.prompt_template is None:
             raise ValueError(f"{self.input_mode} model methods require a prompt template")
-        return render_prompt(self.prompt_template, case)
+        return render_prompt(self.prompt_template, case, input_view=self.input_view)
 
 
-def render_prompt(template: str, case: SafetyCase) -> str:
+def render_prompt(template: str, case: SafetyCase, input_view: str = "full") -> str:
     return template.format(
         id=case.id,
         question=case.question,
         answer=case.answer or "",
+        judging_text=case_text_for_view(case, input_view),
         modality=case.modality,
         attachments=", ".join(case.attachments),
     )
@@ -536,3 +731,11 @@ def _regex_rule_matches(text: str, rule: dict[str, Any]) -> bool:
         return False
     exclude_patterns = [str(pattern) for pattern in list(rule.get("exclude") or [])]
     return not any(re.search(pattern, text, flags=flags) for pattern in exclude_patterns)
+
+
+def _first_regex_rule_match(text: str, rules: list[dict[str, Any]]) -> tuple[str, float] | None:
+    for index, rule in enumerate(rules, start=1):
+        if _regex_rule_matches(text, rule):
+            rule_id = str(rule.get("id") or f"rule_{index}")
+            return rule_id, float(rule.get("confidence", 0.0))
+    return None

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Protocol
 
 import yaml
@@ -39,6 +42,11 @@ class PromptBinaryProvider(Protocol):
 
 
 class CaseBinaryProvider(Protocol):
+    def classify_case(self, case: SafetyCase) -> "BinaryModelOutput":
+        ...
+
+
+class MultimodalCaseProvider(Protocol):
     def classify_case(self, case: SafetyCase) -> "BinaryModelOutput":
         ...
 
@@ -123,6 +131,69 @@ class ClassifierHeadApiProvider:
 
 
 @dataclass
+class AscendVllmChatProvider:
+    api_base: str = "http://127.0.0.1:8000/v1"
+    model: str = "safeguard-merged"
+    api_key_env: str | None = None
+    timeout_seconds: int = 300
+    max_tokens: int = 32
+    temperature: float | None = 0.0
+    top_p: float | None = None
+    system_prompt: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = field(default_factory=lambda: {"enable_thinking": False})
+    extra_payload: dict[str, Any] = field(default_factory=dict)
+    endpoint: str = "/chat/completions"
+    transport: JsonTransport = field(default_factory=lambda: _http_json_transport)
+
+    def complete(self, prompt: str) -> str:
+        response = self.chat_completion(prompt)
+        return _extract_chat_completion_content(response)
+
+    def chat_completion(self, prompt: str) -> dict[str, Any]:
+        response = self.transport(
+            {
+                "url": self._url(),
+                "headers": self._headers(),
+                "json": self._payload(prompt),
+                "timeout_seconds": self.timeout_seconds,
+            }
+        )
+        if not isinstance(response, dict):
+            raise ValueError("Ascend vLLM response must be a JSON object")
+        return response
+
+    def _payload(self, prompt: str) -> dict[str, Any]:
+        messages: list[dict[str, str]] = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.chat_template_kwargs is not None:
+            payload["chat_template_kwargs"] = dict(self.chat_template_kwargs)
+        payload.update(self.extra_payload)
+        return payload
+
+    def _url(self) -> str:
+        endpoint = self.endpoint if self.endpoint.startswith("/") else f"/{self.endpoint}"
+        return f"{self.api_base.rstrip('/')}{endpoint}"
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key_env and os.environ.get(self.api_key_env):
+            headers["Authorization"] = f"Bearer {os.environ[self.api_key_env]}"
+        return headers
+
+
+@dataclass
 class MockPromptBinaryProvider:
     default_label: int = 0
     default_confidence: float | None = 0.8
@@ -174,6 +245,108 @@ class MockClassifierHeadProvider:
             confidence=self.default_confidence,
             raw={"provider": "mock_classifier_head", "case_id": case.id},
         )
+
+
+@dataclass
+class MockMultimodalProbeProvider:
+    default_label: int = 0
+    default_confidence: float | None = 0.8
+    unsafe_keywords: list[str] = field(default_factory=list)
+
+    def classify_case(self, case: SafetyCase) -> BinaryModelOutput:
+        attachment_text = " ".join(case.attachments).casefold()
+        matched_keyword = _first_keyword_match(attachment_text, self.unsafe_keywords)
+        label = 1 if matched_keyword is not None else parse_binary_label(self.default_label)
+        return BinaryModelOutput(
+            label=label,
+            confidence=self.default_confidence,
+            raw={
+                "provider": "mock_multimodal_probe",
+                "case_id": case.id,
+                "attachments": list(case.attachments),
+                "matched_keyword": matched_keyword,
+            },
+        )
+
+
+@dataclass
+class CachedMultimodalProbeProvider:
+    predictions_path: str
+    default_confidence: float | None = None
+    _outputs_by_key: dict[str, BinaryModelOutput] | None = field(default=None, init=False, repr=False)
+
+    def classify_case(self, case: SafetyCase) -> BinaryModelOutput:
+        outputs_by_key = self._load_outputs()
+        for key in self._case_keys(case):
+            output = outputs_by_key.get(key)
+            if output is not None:
+                return BinaryModelOutput(
+                    label=output.label,
+                    confidence=output.confidence,
+                    raw={**output.raw, "provider": "cached_multimodal_probe", "cache_key": key},
+                )
+        keys = ", ".join(self._case_keys(case))
+        raise KeyError(f"no cached multimodal prediction for case {case.id!r}; tried {keys}")
+
+    def _load_outputs(self) -> dict[str, BinaryModelOutput]:
+        if self._outputs_by_key is not None:
+            return self._outputs_by_key
+        path = Path(self.predictions_path)
+        outputs_by_key: dict[str, BinaryModelOutput] = {}
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError(f"cached multimodal record {line_number} must be an object")
+                output = self._output_from_record(record)
+                for key in self._record_keys(record):
+                    outputs_by_key.setdefault(key, output)
+        self._outputs_by_key = outputs_by_key
+        return outputs_by_key
+
+    def _output_from_record(self, record: dict[str, Any]) -> BinaryModelOutput:
+        label_value = _first_optional(record, ["prediction", "pred", "label", "output"])
+        if label_value is None:
+            raise ValueError(f"cached multimodal record missing prediction/label: {record!r}")
+        confidence_value = _first_optional(record, ["confidence", "score"])
+        probability_value = _first_optional(record, ["probability", "prob"])
+        confidence: float | None
+        if confidence_value is not None:
+            confidence = float(confidence_value)
+        elif probability_value is not None:
+            probability = float(probability_value)
+            confidence = max(probability, 1.0 - probability)
+        else:
+            confidence = self.default_confidence
+        return BinaryModelOutput(label=parse_binary_label(label_value), confidence=confidence, raw={"cached_record": record})
+
+    def _record_keys(self, record: dict[str, Any]) -> list[str]:
+        keys: list[str] = []
+        for field_name in ("case_id", "id"):
+            value = record.get(field_name)
+            if value is not None and value != "":
+                keys.append(f"id:{value}")
+        for field_name in ("image_path", "image", "attachment"):
+            value = record.get(field_name)
+            if value:
+                keys.append(f"image:{_normalize_cache_path(str(value))}")
+        question_sha1 = record.get("question_sha1")
+        if question_sha1:
+            keys.append(f"question_sha1:{question_sha1}")
+        question = record.get("question")
+        if question:
+            keys.append(f"question_sha1:{_sha1_text(str(question))}")
+        return _dedupe_preserve_order(keys)
+
+    def _case_keys(self, case: SafetyCase) -> list[str]:
+        keys = [f"id:{case.id}"]
+        image_path = _first_image_attachment(case)
+        if image_path:
+            keys.append(f"image:{_normalize_cache_path(image_path)}")
+        keys.append(f"question_sha1:{_sha1_text(case.question)}")
+        return _dedupe_preserve_order(keys)
 
 
 @dataclass
@@ -427,6 +600,161 @@ class Qwen3GuardScriptProvider:
 
 
 @dataclass
+class OneCaseMultimodalProbeProvider:
+    script_path: str
+    model_path: str
+    probe_model_path: str
+    device: str = "cuda:1"
+    save_root: str = "outputs/multimodal_probe"
+    save_layers: Any = field(default_factory=lambda: [42])
+    source_layer: int = 42
+    target_layers: Any = 27
+    project_save_layers: Any = "last"
+    token_slice: Any = "all"
+    probe_input_dim: int = 248320
+    threshold: float = 0.5
+    cache_model: bool = True
+    disable_torch_compile: bool = False
+    patch_torch_distributed_tensor: bool = False
+
+    def classify_case(self, case: SafetyCase) -> BinaryModelOutput:
+        image_path = _first_image_attachment(case)
+        if image_path is None:
+            raise ValueError(f"multimodal probe case {case.id!r} has no image attachment")
+
+        runtime = self._get_runtime()
+        data_path, data_name = self._write_case_data(case, image_path)
+        args = self._runtime_args(data_path)
+
+        self._clear_generated_case_dirs(data_name)
+        runtime.module.save_merge_layer(data_path, args, runtime.model, runtime.processor, self.save_layers)
+        runtime.module.run_project_mode(args, runtime.model, runtime.processor)
+        probability, confidence, feature_paths = self._score_projected_features(runtime, data_name)
+        label = 1 if probability > self.threshold else 0
+        return BinaryModelOutput(
+            label=label,
+            confidence=confidence,
+            raw={
+                "provider": "one_case_multimodal_probe",
+                "case_id": case.id,
+                "image_path": image_path,
+                "data_path": data_path,
+                "probability": probability,
+                "threshold": self.threshold,
+                "feature_paths": feature_paths,
+            },
+        )
+
+    def _get_runtime(self) -> "_OneCaseMultimodalRuntime":
+        cache_key = (
+            str(Path(self.script_path).resolve(strict=False)),
+            self.model_path,
+            self.probe_model_path,
+            self.device,
+            self.probe_input_dim,
+        )
+        if self.cache_model and cache_key in _ONE_CASE_MULTIMODAL_RUNTIME_CACHE:
+            return _ONE_CASE_MULTIMODAL_RUNTIME_CACHE[cache_key]
+
+        torch = _import_torch()
+        original_torch_compile = _apply_transformers_load_compat(
+            torch,
+            disable_torch_compile=self.disable_torch_compile,
+            patch_torch_distributed_tensor=self.patch_torch_distributed_tensor,
+        )
+        try:
+            module = _load_python_module(self.script_path)
+            load_args = SimpleNamespace(model_path=self.model_path, device=self.device)
+            model, processor = module.load_model(load_args)
+            torch = _module_torch(module)
+            nn = getattr(module, "nn", None)
+            if nn is None:
+                import torch.nn as nn  # type: ignore[no-redef]
+
+            probe_model = nn.Linear(self.probe_input_dim, 1)
+            try:
+                state_dict = torch.load(self.probe_model_path, map_location=self.device, weights_only=True)
+            except TypeError:
+                state_dict = torch.load(self.probe_model_path, map_location=self.device)
+            probe_model.load_state_dict(state_dict)
+            probe_model.to(self.device)
+            probe_model.eval()
+            setattr(module, "model", model)
+        finally:
+            if original_torch_compile is not None:
+                torch.compile = original_torch_compile
+
+        runtime = _OneCaseMultimodalRuntime(module=module, model=model, processor=processor, probe_model=probe_model)
+        if self.cache_model:
+            _ONE_CASE_MULTIMODAL_RUNTIME_CACHE[cache_key] = runtime
+        return runtime
+
+    def _write_case_data(self, case: SafetyCase, image_path: str) -> tuple[str, str]:
+        input_dir = Path(self.save_root) / "inputs"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        fingerprint = hashlib.sha1(
+            json.dumps(
+                {"id": case.id, "question": case.question, "image": image_path},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        data_name = f"case_{_safe_filename(case.id)}_{fingerprint}"
+        data_path = input_dir / f"{data_name}.json"
+        data_path.write_text(
+            json.dumps([{"id": case.id, "question": case.question, "image": image_path}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return data_path.as_posix(), data_name
+
+    def _runtime_args(self, data_path: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            model_path=self.model_path,
+            device=self.device,
+            data_paths=data_path,
+            save_root=self.save_root,
+            save_layers=self.save_layers,
+            source_layer=self.source_layer,
+            target_layers=self.target_layers,
+            project_save_layers=self.project_save_layers,
+            token_slice=self.token_slice,
+        )
+
+    def _clear_generated_case_dirs(self, data_name: str) -> None:
+        save_root = Path(self.save_root)
+        for path in (save_root / data_name, save_root / f"投影{data_name}"):
+            if path.exists():
+                shutil.rmtree(path)
+
+    def _score_projected_features(
+        self,
+        runtime: "_OneCaseMultimodalRuntime",
+        data_name: str,
+    ) -> tuple[float, float, list[str]]:
+        project_dir = Path(self.save_root) / f"投影{data_name}"
+        feature_paths = sorted(path for path in project_dir.rglob("*.pt") if path.is_file())
+        if not feature_paths:
+            raise RuntimeError(f"one_case multimodal probe produced no projected features under {project_dir}")
+
+        torch = _module_torch(runtime.module)
+        probabilities: list[float] = []
+        with torch.no_grad():
+            for feature_path in feature_paths:
+                hidden_states = runtime.module.load_hidden_states(feature_path)
+                feature = runtime.module.get_logit(hidden_states).to(torch.float32)
+                std = feature.std(unbiased=False)
+                if torch.isnan(std) or torch.isinf(std) or std.item() < 1e-8:
+                    std = torch.tensor(1.0, dtype=feature.dtype)
+                feature = (feature - feature.mean()) / std
+                output = runtime.probe_model(feature.clone().detach().unsqueeze(0).to(self.device).float())
+                probabilities.append(float(torch.sigmoid(output).flatten()[0].item()))
+
+        probability = sum(probabilities) / len(probabilities)
+        confidence = max(probability, 1.0 - probability)
+        return probability, confidence, [path.as_posix() for path in feature_paths]
+
+
+@dataclass
 class LocalClassifierHeadProvider:
     model_path: str
 
@@ -587,6 +915,14 @@ class _TransformersBackend:
     model: Any
 
 
+@dataclass
+class _OneCaseMultimodalRuntime:
+    module: Any
+    model: Any
+    processor: Any
+    probe_model: Any
+
+
 _LOCAL_GENERATION_BACKEND_CACHE: dict[
     tuple[str, bool, str, str | None, str, str | None, bool | None, bool, bool],
     _TransformersBackend,
@@ -594,6 +930,7 @@ _LOCAL_GENERATION_BACKEND_CACHE: dict[
 _PYTHON_MODULE_CACHE: dict[str, Any] = {}
 _MERGED_SAFEGUARD_RUNTIME_CACHE: dict[tuple[str, str, str, str], Any] = {}
 _QWEN3GUARD_RUNTIME_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
+_ONE_CASE_MULTIMODAL_RUNTIME_CACHE: dict[tuple[str, str, str, str, int], _OneCaseMultimodalRuntime] = {}
 
 
 def load_provider_config(path: str | Path) -> dict[str, Any]:
@@ -657,6 +994,13 @@ def build_binary_provider(config: dict[str, Any]) -> Any:
             fallback_label=None if fallback_label is None else parse_binary_label(fallback_label),
             use_llm_parse_fallback=bool(config.get("use_llm_parse_fallback", True)),
         )
+    if provider_type == "ascend_vllm_prompt_binary":
+        fallback_label = config.get("fallback_label")
+        return LocalPromptBinaryProvider(
+            generator=build_ascend_vllm_chat_provider(config),
+            fallback_label=None if fallback_label is None else parse_binary_label(fallback_label),
+            use_llm_parse_fallback=bool(config.get("use_llm_parse_fallback", True)),
+        )
     raise ValueError(f"unknown binary provider type: {provider_type!r}")
 
 
@@ -679,7 +1023,47 @@ def build_text_generation_provider(config: dict[str, Any]) -> TextGenerationProv
         return build_qwen3guard_script_provider(config)
     if provider_type == "merged_safeguard_script":
         return build_merged_safeguard_script_provider(config)
+    if provider_type == "ascend_vllm_chat":
+        return build_ascend_vllm_chat_provider(config)
     raise ValueError(f"unknown text generation provider type: {provider_type!r}")
+
+
+def build_multimodal_provider(config: dict[str, Any]) -> MultimodalCaseProvider:
+    provider_type = config.get("type")
+    if provider_type == "mock_multimodal_probe":
+        return MockMultimodalProbeProvider(
+            default_label=parse_binary_label(config.get("default_label", 0)),
+            default_confidence=config.get("default_confidence", 0.8),
+            unsafe_keywords=list(config.get("unsafe_keywords") or []),
+        )
+    if provider_type == "cached_multimodal_probe":
+        return CachedMultimodalProbeProvider(
+            predictions_path=resolve_provider_path(config["predictions_path"], config),
+            default_confidence=config.get("default_confidence"),
+        )
+    if provider_type == "one_case_multimodal_probe":
+        return build_one_case_multimodal_probe_provider(config)
+    raise ValueError(f"unknown multimodal provider type: {provider_type!r}")
+
+
+def build_one_case_multimodal_probe_provider(config: dict[str, Any]) -> OneCaseMultimodalProbeProvider:
+    return OneCaseMultimodalProbeProvider(
+        script_path=resolve_provider_path(config["script_path"], config),
+        model_path=resolve_provider_path(config["model_path"], config),
+        probe_model_path=resolve_provider_path(config["probe_model_path"], config),
+        device=str(config.get("device", "cuda:1")),
+        save_root=resolve_provider_path(config.get("save_root", "outputs/multimodal_probe"), config),
+        save_layers=config.get("save_layers", [42]),
+        source_layer=int(config.get("source_layer", 42)),
+        target_layers=config.get("target_layers", 27),
+        project_save_layers=config.get("project_save_layers", "last"),
+        token_slice=config.get("token_slice", "all"),
+        probe_input_dim=int(config.get("probe_input_dim", 248320)),
+        threshold=float(config.get("threshold", 0.5)),
+        cache_model=bool(config.get("cache_model", True)),
+        disable_torch_compile=bool(config.get("disable_torch_compile", False)),
+        patch_torch_distributed_tensor=bool(config.get("patch_torch_distributed_tensor", False)),
+    )
 
 
 def build_merged_safeguard_script_provider(config: dict[str, Any]) -> MergedSafeGuardScriptProvider:
@@ -728,6 +1112,22 @@ def build_subprocess_text_generation_provider(config: dict[str, Any]) -> Subproc
         cwd=resolve_provider_path(config["cwd"], config) if config.get("cwd") else None,
         env={str(key): str(value) for key, value in dict(config.get("env") or {}).items()},
         output_json_field=config.get("output_json_field"),
+    )
+
+
+def build_ascend_vllm_chat_provider(config: dict[str, Any]) -> AscendVllmChatProvider:
+    return AscendVllmChatProvider(
+        api_base=str(config.get("api_base") or config.get("base_url") or "http://127.0.0.1:8000/v1"),
+        model=str(config.get("model", "safeguard-merged")),
+        api_key_env=config.get("api_key_env"),
+        timeout_seconds=int(config.get("timeout_seconds", 300)),
+        max_tokens=int(config.get("max_tokens", config.get("max_new_tokens", 32))),
+        temperature=_optional_float(config.get("temperature", 0.0)),
+        top_p=_optional_float(config.get("top_p")),
+        system_prompt=_optional_string(config.get("system_prompt")),
+        chat_template_kwargs=_coerce_chat_template_kwargs(config),
+        extra_payload=dict(config.get("extra_payload") or {}),
+        endpoint=str(config.get("endpoint", "/chat/completions")),
     )
 
 
@@ -870,6 +1270,41 @@ def _first_keyword_match(lowered_text: str, keywords: list[str]) -> str | None:
     return None
 
 
+def _first_image_attachment(case: SafetyCase) -> str | None:
+    for attachment in case.attachments:
+        text = str(attachment).strip()
+        if text:
+            return text
+    return None
+
+
+def _safe_filename(value: str, limit: int = 40) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+    return (safe or "case")[:limit]
+
+
+def _normalize_cache_path(value: str) -> str:
+    expanded = Path(os.path.expandvars(value)).expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve(strict=False).as_posix()
+    return str(value).strip()
+
+
+def _sha1_text(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
@@ -893,6 +1328,22 @@ def _optional_bool(value: Any) -> bool | None:
     if lowered in {"false", "0", "no", "n", "off"}:
         return False
     raise ValueError(f"cannot parse bool from {value!r}")
+
+
+def _coerce_chat_template_kwargs(config: dict[str, Any]) -> dict[str, Any] | None:
+    value = config.get("chat_template_kwargs", {"enable_thinking": False})
+    if value is None:
+        kwargs = None
+    elif isinstance(value, dict):
+        kwargs = dict(value)
+    else:
+        raise TypeError("chat_template_kwargs must be a mapping or null")
+
+    if "enable_thinking" in config:
+        if kwargs is None:
+            kwargs = {}
+        kwargs["enable_thinking"] = _optional_bool(config["enable_thinking"])
+    return kwargs
 
 
 def _stable_config_key(value: Any) -> str:
@@ -953,11 +1404,17 @@ def _dataclass_to_dict(value: Any) -> dict[str, Any]:
 
 
 def _extract_question_answer_prompt(prompt: str) -> tuple[str, str]:
-    match = re.search(r"^\s*Question:\s*(?P<question>.*?)(?:\n\s*Answer:\s*(?P<answer>.*))?\s*$", prompt, flags=re.DOTALL)
+    match = re.search(
+        r"^\s*Question:[ \t]*(?P<question>.*?)(?:\r?\n[ \t]*Answer:[ \t]*(?P<answer>.*))?\s*$",
+        prompt,
+        flags=re.DOTALL,
+    )
     if not match:
         return prompt, ""
     question = (match.group("question") or "").strip()
     answer = (match.group("answer") or "").strip()
+    if answer:
+        return question, answer
     return question or prompt, answer
 
 
@@ -1003,6 +1460,40 @@ def _extract_json_payloads(text: str) -> list[dict[str, Any]]:
     return payloads
 
 
+def _extract_chat_completion_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError(f"chat completion response missing choices: {payload!r}")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise ValueError(f"chat completion choice must be an object: {choice!r}")
+
+    message = choice.get("message")
+    if isinstance(message, dict) and "content" in message:
+        return _coerce_chat_content_to_text(message.get("content"))
+    if "text" in choice:
+        return _coerce_chat_content_to_text(choice.get("text"))
+    raise ValueError(f"chat completion choice missing message.content: {choice!r}")
+
+
+def _coerce_chat_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts).strip()
+    return str(content).strip()
+
+
 def _import_torch():
     try:
         import torch
@@ -1011,6 +1502,11 @@ def _import_torch():
             "local model inference requires PyTorch. Install the optional local-model dependencies before using a local LM provider."
         ) from exc
     return torch
+
+
+def _module_torch(module: Any) -> Any:
+    module_torch = getattr(module, "torch", None)
+    return module_torch if module_torch is not None else _import_torch()
 
 
 def _load_transformers_backend(

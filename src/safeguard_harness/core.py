@@ -7,6 +7,10 @@ SAFE = "safe"
 UNSAFE = "unsafe"
 UNKNOWN = "unknown"
 VALID_LABELS = {SAFE, UNSAFE, UNKNOWN}
+IMAGE_FIELD_KEYS = ("image", "image_path", "image_file", "img")
+IMAGE_LIST_FIELD_KEYS = ("images", "image_paths", "image_files", "imgs")
+IMAGE_MODALITIES = {"image", "images", "vision", "multimodal", "multi_modal"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 
 def validate_label(label: str | None, *, allow_none: bool = False) -> str | None:
@@ -32,14 +36,29 @@ class SafetyCase:
         if not payload.get("question"):
             raise ValueError("case requires a non-empty question")
         label = validate_label(payload.get("label"), allow_none=True)
+        metadata = dict(payload.get("metadata") or {})
+        attachments = _coerce_string_list(payload.get("attachments") or [])
+        image_refs = extract_image_references(payload)
+        for image_ref in image_refs:
+            if image_ref not in attachments:
+                attachments.append(image_ref)
+
+        modality = str(payload.get("modality") or "text")
+        has_image = _payload_has_image(payload, image_refs=image_refs, attachments=attachments, modality=modality)
+        if has_image:
+            metadata.setdefault("has_image", True)
+            metadata.setdefault("image_attachments", list(image_refs or attachments))
+            if modality.casefold() == "text":
+                modality = "image"
+
         return cls(
             id=str(payload.get("id") or "case"),
             question=str(payload["question"]),
             answer=payload.get("answer"),
             label=label,
-            modality=str(payload.get("modality") or "text"),
-            attachments=list(payload.get("attachments") or []),
-            metadata=dict(payload.get("metadata") or {}),
+            modality=modality,
+            attachments=attachments,
+            metadata=metadata,
         )
 
     def text_for_judging(self) -> str:
@@ -47,6 +66,13 @@ class SafetyCase:
         if self.answer:
             parts.append(self.answer)
         return "\n".join(parts)
+
+    def has_image(self) -> bool:
+        if self.metadata.get("has_image") is True and self.attachments:
+            return True
+        if self.modality.casefold() in IMAGE_MODALITIES and self.attachments:
+            return True
+        return any(is_image_reference(attachment) for attachment in self.attachments)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,3 +192,77 @@ class RunContext:
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
+
+def extract_image_references(payload: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for key in IMAGE_FIELD_KEYS:
+        refs.extend(_image_reference_strings(payload.get(key)))
+    for key in IMAGE_LIST_FIELD_KEYS:
+        refs.extend(_image_reference_strings(payload.get(key)))
+    return _dedupe_preserve_order(refs)
+
+
+def is_image_reference(value: Any) -> bool:
+    text = str(value).strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if lowered.startswith("data:image/"):
+        return True
+    path_part = lowered.split("?", 1)[0].split("#", 1)[0]
+    return any(path_part.endswith(extension) for extension in IMAGE_EXTENSIONS)
+
+
+def _payload_has_image(
+    payload: dict[str, Any],
+    *,
+    image_refs: list[str],
+    attachments: list[str],
+    modality: str,
+) -> bool:
+    if image_refs:
+        return True
+    payload_metadata = payload.get("metadata")
+    if isinstance(payload_metadata, dict) and payload_metadata.get("has_image") is True and attachments:
+        return True
+    if modality.casefold() in IMAGE_MODALITIES and attachments:
+        return True
+    return any(is_image_reference(attachment) for attachment in attachments)
+
+
+def _image_reference_strings(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        refs: list[str] = []
+        for item in value:
+            refs.extend(_image_reference_strings(item))
+        return refs
+    if isinstance(value, dict):
+        for key in ("image", "image_path", "path", "url", "file", "image_url"):
+            if key in value:
+                return _image_reference_strings(value[key])
+    return [str(value)]
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if item is not None and item != ""]
+    return [str(value)]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        deduped.append(value)
+        seen.add(value)
+    return deduped

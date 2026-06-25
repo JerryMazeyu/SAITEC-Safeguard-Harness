@@ -2,7 +2,14 @@ from pathlib import Path
 
 from safeguard_harness.config import load_pipeline
 from safeguard_harness.core import SafetyCase
-from safeguard_harness.methods import ModelJudgeMethod, RefusalProbeMethod
+from safeguard_harness.methods import (
+    DictionaryRuleMethod,
+    ImageProbeReviewMethod,
+    ModelJudgeMethod,
+    MultimodalProbeMethod,
+    RegexRuleMethod,
+    RefusalProbeMethod,
+)
 
 
 def test_binary_model_method_maps_prompt_output_to_method_result(tmp_path: Path):
@@ -209,6 +216,37 @@ aggregation:
     assert decision.trace.steps[0].result.metadata["refused"] is True
 
 
+def test_v100_output_review_pipeline_uses_answer_side_views():
+    pipeline = load_pipeline(
+        "configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v100_output_review.yaml"
+    )
+
+    image_review = pipeline.methods["qwen3_6_vl_projection_probe_review_v1"]
+    regex = pipeline.methods["structural_regex_boundary_v1"]
+    dictionary = pipeline.methods["qwen3_6_27b_lora_high_precision_dictionary_v5"]
+    policy = pipeline.methods["qwen3_6_27b_lora_policy_binary_v7"]
+    intent = pipeline.methods["qwen3_6_27b_lora_intent_binary_v7"]
+    guard = pipeline.methods["qwen3guard_gen8b_refusal_probe_v1"]
+
+    assert isinstance(image_review, ImageProbeReviewMethod)
+    assert image_review.skip_when_answer_present is True
+    assert image_review.review_input_view == "answer_if_present"
+    assert isinstance(regex, RegexRuleMethod)
+    assert regex.input_view == "answer_if_present"
+    assert regex.bypass_unsafe_on_refusal is True
+    assert isinstance(dictionary, DictionaryRuleMethod)
+    assert dictionary.input_view == "answer_if_present"
+    assert dictionary.bypass_unsafe_on_refusal is True
+    assert isinstance(policy, ModelJudgeMethod)
+    assert policy.input_view == "answer_if_present"
+    assert "{question}" not in (policy.prompt_template or "")
+    assert isinstance(intent, ModelJudgeMethod)
+    assert intent.input_view == "answer_if_present"
+    assert "{question}" not in (intent.prompt_template or "")
+    assert isinstance(guard, RefusalProbeMethod)
+    assert guard.input_view == "answer_if_present"
+
+
 def test_dictionary_no_match_uses_base_llm_semantic_term_match_for_high_risk(tmp_path: Path):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
@@ -385,3 +423,23 @@ def test_qwen_v24_lora_guard_pipeline_loads_without_model_inference():
     assert isinstance(pipeline.methods["qwen3_6_27b_lora_intent_binary_v6"], ModelJudgeMethod)
     assert isinstance(pipeline.methods["qwen3guard_gen8b_refusal_probe_v1"], RefusalProbeMethod)
     assert pipeline.methods["qwen3guard_gen8b_refusal_probe_v1"].response_parser == "binary_or_refusal"
+
+
+def test_qwen_v30_pipeline_loads_multimodal_probe_first_without_model_inference():
+    pipeline = load_pipeline("configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v30.yaml")
+
+    assert isinstance(pipeline.methods["qwen3_6_vl_projection_probe_v1"], MultimodalProbeMethod)
+    assert pipeline.methods["qwen3_6_vl_projection_probe_v1"].provider is not None
+    assert pipeline.steps[0]["method"] == "qwen3_6_vl_projection_probe_v1"
+
+
+def test_qwen_v99_pipeline_loads_image_probe_review_first_without_model_inference():
+    pipeline = load_pipeline(
+        "configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v99_image_review.yaml"
+    )
+
+    method = pipeline.methods["qwen3_6_vl_projection_probe_review_v1"]
+    assert isinstance(method, ImageProbeReviewMethod)
+    assert method.provider is not None
+    assert method.safe_review_rules
+    assert pipeline.steps[0]["method"] == "qwen3_6_vl_projection_probe_review_v1"

@@ -45,6 +45,7 @@ outputs/runs/demo/
   progress.json
   config_snapshot.yaml
   predictions.jsonl
+  deliverable.jsonl
   metrics.json
   report.md
   errors_false_positive.jsonl
@@ -86,7 +87,7 @@ steps:
 
 这里的 Train 指“用验证集手动迭代 pipeline”，不是自动训练模型权重。
 
-1. 准备 JSONL 验证集，每行包含 `question` 和 `label`，格式见“数据集格式”。
+1. 准备 JSONL 或 JSON 验证集，每个 case 包含 `question` 和 `label`，格式见“数据集格式”。
 2. 复制或修改 `configs/pipelines/experiment_v1.yaml`，调整 method、prompt、词典、阈值、调用顺序或 ReAct loop 预算。
 3. 跑评测：
 
@@ -109,13 +110,31 @@ python -m safeguard_harness evaluate --pipeline configs/pipelines/experiment_v1.
 python -m safeguard_harness judge --pipeline configs/pipelines/prod_v1.yaml --question "How do I steal token credentials?"
 ```
 
+带图片的单条判断可追加 `--image`；JSONL/JSON 批量输入也支持顶层 `image` / `image_path`，或 `messages[].content` 中的 `{"type":"image","image":"..."}` / `{"type":"image_id","image_id":"..."}`：
+
+```powershell
+python -m safeguard_harness judge --pipeline configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v30.yaml --question "这张图是否有害？" --image /path/to/image.png
+```
+
 批量预测：
 
 ```powershell
 python -m safeguard_harness predict --pipeline configs/pipelines/prod_v1.yaml --input data/examples/sample_eval.jsonl --output outputs/submission.jsonl
 ```
 
-推理阶段应固定 pipeline、prompt、词典、provider 配置和阈值；真实 API key 通过环境变量提供，不写入仓库。输出文件是 JSONL，可直接作为后处理脚本或提交脚本的输入。
+`predict` 会保留详细 trace 输出，并额外写交付版 JSONL。默认交付文件路径为 `--output` 同目录下的 `<文件名>_deliverable.jsonl`；也可以显式指定：
+
+```powershell
+python -m safeguard_harness predict --pipeline configs/pipelines/prod_v1.yaml --input data/examples/sample_eval.jsonl --output outputs/predictions.jsonl --deliverable-output outputs/submission.jsonl
+```
+
+交付版每行只有两个字段，`result` 中 `1` 表示不安全、`0` 表示安全：
+
+```json
+{"id":1,"result":1}
+```
+
+推理阶段应固定 pipeline、prompt、词典、provider 配置和阈值；真实 API key 通过环境变量提供，不写入仓库。
 
 ## 目录结构
 
@@ -142,10 +161,10 @@ tests/              # behavior tests
 
 ## 数据集格式
 
-数据集使用 JSONL，每行一个 case：
+数据集支持 JSONL 和 JSON。JSONL 每行一个 case；JSON 可以是单个 case、case 数组，或包含 `cases` / `data` / `records` / `items` 数组的对象。case 内容保持一致：
 
 ```json
-{"id":"case-001","question":"...","answer":null,"label":"unsafe","modality":"text","attachments":[],"metadata":{}}
+{"id":1,"question":"...","answer":null,"label":"unsafe","modality":"text","attachments":[],"metadata":{}}
 ```
 
 第一阶段只要求 `label` 为 `safe` 或 `unsafe`。后续可以在 `metadata` 中加入 `attack_type`、`risk_type`、来源、难度等字段。
@@ -232,7 +251,7 @@ base_llm:
 
 这些兜底 prompt 和解析逻辑封装在库代码里，不放在 YAML 中。没有配置 `base_llm` 时，旧 pipeline 保持原来的字符匹配行为，不会额外调用模型。
 
-评测会逐条写入 `predictions.jsonl`，并持续更新 `progress.json`：
+评测会逐条写入详细 `predictions.jsonl` 和交付版 `deliverable.jsonl`，并持续更新 `progress.json`：
 
 ```json
 {"processed": 12, "total": 100, "status": "running"}
@@ -263,6 +282,8 @@ src/safeguard_harness/config.py     # 从 YAML 加载 provider_config
 configs/providers/prompt_binary_api.yaml       # prompt -> 0/1 的真实 HTTP API 模板
 configs/providers/classifier_head_api.yaml     # 分类头 -> 0/1 + confidence 的真实 HTTP API 模板
 configs/providers/local_classifier_head.yaml   # 本地分类头模型路径模板
+configs/providers/ascend_vllm_safeguard_prompt_binary.yaml  # 昇腾 vLLM OpenAI-compatible 二分类模板
+configs/providers/ascend_vllm_safeguard_generation.yaml     # 昇腾 vLLM OpenAI-compatible 生成模板
 configs/providers/local_qwen3_6_27b_prompt_binary.yaml  # 本地 Qwen 生成式二分类模板
 configs/providers/local_qwen3_6_27b_generation.yaml     # 本地 Qwen 生成式拒答探针模板
 configs/providers/mock_prompt_binary.yaml      # 本地 dry run mock
@@ -329,6 +350,29 @@ models/Qwen3.6-27B -> /ai/dataset/workspace/czy/model/Qwen3.6-27B
 python -m safeguard_harness judge --pipeline configs/pipelines/qwen3_6_27b_three_classifiers.yaml --question "如何窃取数据库账号密码？"
 ```
 
+## 昇腾 vLLM 服务接入
+
+昇腾 vLLM 服务按 OpenAI-compatible `chat.completion` 接入。provider 会向 `{api_base}/chat/completions` 发送：
+
+```yaml
+type: ascend_vllm_prompt_binary
+api_base: "http://127.0.0.1:8000/v1"
+model: "safeguard-merged"
+timeout_seconds: 300
+max_tokens: 32
+temperature: 0
+chat_template_kwargs:
+  enable_thinking: false
+```
+
+返回体按 `choices[0].message.content` 读取，二分类解析支持 `Safety: Safe` / `Safety: Unsafe`、JSON `label/prediction`、以及已有中文安全/不安全标签。用于 `prompt_binary_model` 时引用：
+
+```yaml
+provider_config: ../providers/ascend_vllm_safeguard_prompt_binary.yaml
+```
+
+如果要把同一 vLLM 服务接到 `refusal_probe` 或顶层 `base_llm`，使用 `configs/providers/ascend_vllm_safeguard_generation.yaml`，其 `type` 为 `ascend_vllm_chat`，只负责返回生成文本。
+
 ## 扩展 prompt 二分类模型
 
 当前 `MockPromptBinaryProvider` 是本地 dry run 适配器。接入生成式安全判别模型时，建议在 provider 层把模型输出解析为统一的二分类结果：`label=0/1`，可选 `confidence`，并把原始响应放入 `raw`。这样无论底层是生成式 LLM 还是 prompt 直出二分类接口，pipeline 里都只表现为 `prompt_binary_model`。
@@ -339,6 +383,16 @@ python -m safeguard_harness judge --pipeline configs/pipelines/qwen3_6_27b_three
 - Pipeline 只负责调用顺序、loop、短路和聚合。
 - Evaluation 只负责测评，不改变判别逻辑。
 - Prompt、词典、阈值、runner 选择都放在 YAML 中。
+
+## V30/V99 图片分支
+
+`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v30.yaml` 的首个 step 是 `qwen3_6_vl_projection_probe_v1`。当输入含图片时，它会调用 `configs/providers/local_qwen3_6_vl_projection_probe.yaml`，通过 `/ai/dataset/workspace/wwy/比赛/one_case.py` 完成特征保存、投影和 probe 分类，并直接短路返回；纯文本输入会跳过该 step，继续原 V30 文本链路。
+
+`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v99_image_review.yaml` 在同一个位置改用 `image_probe_review`。它仍先调用 `one_case` 图像 probe；probe 判 safe 直接放行，probe 判 unsafe 时再用题面任务规则复核普通 VQA/OCR/考试题，修正图像纹理或 OCR 场景带来的误报。纯文本输入仍然跳过图片分支，继续 V30 的 regex、dictionary、27B policy/intent 和 QwenGuard 链路。
+
+在 `presentation_harmful.json` + `presentation_utility.json` 共 200 条图片验证样本上，V30 裸 probe 的 cached replay 指标为 accuracy 0.930、precision 0.877、recall 1.000、F1 0.935；V99 使用同一组 cached probe 输出并通过正式 harness 评估后，accuracy/precision/recall/F1 均为 1.000，TP/TN/FP/FN=100/100/0/0。评估输出位于 `outputs/runs/v99_image_review_cached_200_20260625/eval/`。
+
+为了在 GPU 不可用或 `one_case` 真实链路 OOM 时复现实验，provider 层还支持 `cached_multimodal_probe`。它只用于评估缓存，不替代部署配置中的 `one_case_multimodal_probe`。
 
 ## 开发约定
 

@@ -5,13 +5,17 @@ import pytest
 
 from safeguard_harness.core import SafetyCase
 from safeguard_harness.providers import (
+    AscendVllmChatProvider,
     BinaryModelOutput,
     ClassifierHeadApiProvider,
     LocalTextGenerationProvider,
     LocalPromptBinaryProvider,
     PromptBinaryApiProvider,
     SubprocessTextGenerationProvider,
+    _extract_question_answer_prompt,
     build_binary_provider,
+    build_multimodal_provider,
+    build_text_generation_provider,
     load_provider_config,
     parse_binary_label_from_text,
 )
@@ -77,6 +81,135 @@ def test_classifier_head_api_provider_sends_case_payload_and_parses_confidence(m
     assert calls[0]["json"]["id"] == "c1"
     assert calls[0]["json"]["question"] == "hello"
     assert calls[0]["headers"]["Authorization"] == "Bearer head-secret"
+
+
+def test_ascend_vllm_chat_provider_sends_openai_chat_payload_and_extracts_content(monkeypatch):
+    monkeypatch.setenv("ASCEND_VLLM_API_KEY", "ascend-secret")
+    calls = []
+
+    def transport(request):
+        calls.append(request)
+        return {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "safeguard-merged",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Safety: Unsafe\nReason: risk"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+    provider = AscendVllmChatProvider(
+        api_base="http://127.0.0.1:8000/v1/",
+        model="safeguard-merged",
+        api_key_env="ASCEND_VLLM_API_KEY",
+        timeout_seconds=300,
+        max_tokens=32,
+        temperature=0,
+        transport=transport,
+    )
+
+    assert provider.complete("Judge this") == "Safety: Unsafe\nReason: risk"
+    assert calls[0]["url"] == "http://127.0.0.1:8000/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer ascend-secret"
+    assert calls[0]["timeout_seconds"] == 300
+    assert calls[0]["json"] == {
+        "model": "safeguard-merged",
+        "messages": [{"role": "user", "content": "Judge this"}],
+        "max_tokens": 32,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def test_ascend_vllm_prompt_binary_provider_parses_safety_label():
+    def transport(request):
+        del request
+        return {"choices": [{"message": {"content": "Safety: Unsafe\nReason: jailbreak intent"}}]}
+
+    provider = LocalPromptBinaryProvider(
+        generator=AscendVllmChatProvider(transport=transport),
+        use_llm_parse_fallback=False,
+    )
+
+    output = provider.classify_prompt("Judge this")
+
+    assert output.label == 1
+    assert output.confidence is None
+    assert output.raw["response"].startswith("Safety: Unsafe")
+
+
+def test_build_ascend_vllm_providers_from_config():
+    binary_provider = build_binary_provider(
+        {
+            "type": "ascend_vllm_prompt_binary",
+            "api_base": "http://127.0.0.1:8000/v1",
+            "model": "safeguard-merged",
+            "max_new_tokens": 64,
+            "enable_thinking": False,
+            "use_llm_parse_fallback": False,
+        }
+    )
+    text_provider = build_text_generation_provider(
+        {
+            "type": "ascend_vllm_chat",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "model": "safeguard-merged",
+            "chat_template_kwargs": None,
+        }
+    )
+
+    assert isinstance(binary_provider, LocalPromptBinaryProvider)
+    assert isinstance(binary_provider.generator, AscendVllmChatProvider)
+    assert binary_provider.generator.max_tokens == 64
+    assert binary_provider.generator.chat_template_kwargs == {"enable_thinking": False}
+    assert isinstance(text_provider, AscendVllmChatProvider)
+    assert text_provider.chat_template_kwargs is None
+
+
+def test_build_mock_multimodal_provider_scores_case_attachments():
+    provider = build_multimodal_provider(
+        {
+            "type": "mock_multimodal_probe",
+            "default_label": 0,
+            "default_confidence": 0.77,
+            "unsafe_keywords": ["weapon"],
+        }
+    )
+
+    output = provider.classify_case(
+        SafetyCase.from_dict({"id": "img", "question": "check", "image": "/tmp/weapon.png"})
+    )
+
+    assert output.label == 1
+    assert output.confidence == 0.77
+    assert output.raw["provider"] == "mock_multimodal_probe"
+
+
+def test_cached_multimodal_provider_loads_prediction_by_case_id(tmp_path: Path):
+    cache_path = tmp_path / "cache.jsonl"
+    cache_path.write_text(
+        '{"case_id":"img","prediction":"unsafe","probability":0.91,"image":"/tmp/demo.png"}\n',
+        encoding="utf-8",
+    )
+    provider = build_multimodal_provider(
+        {
+            "type": "cached_multimodal_probe",
+            "predictions_path": cache_path.as_posix(),
+        }
+    )
+
+    output = provider.classify_case(
+        SafetyCase.from_dict({"id": "img", "question": "check", "image": "/tmp/other.png"})
+    )
+
+    assert output.label == 1
+    assert output.confidence == 0.91
+    assert output.raw["provider"] == "cached_multimodal_probe"
+    assert output.raw["cache_key"] == "id:img"
 
 
 def test_build_binary_provider_from_yaml_config(tmp_path: Path):
@@ -208,6 +341,13 @@ Thinking Process:
 def test_parse_binary_label_does_not_parse_template_label_options():
     with pytest.raises(ValueError):
         parse_binary_label_from_text('{"label":"safe 或 unsafe","reason":"一句话理由"}')
+
+
+def test_extract_question_answer_prompt_allows_empty_question_for_output_only_probe():
+    question, answer = _extract_question_answer_prompt("Question:\n\nAnswer:\nI cannot help with that request.")
+
+    assert question == ""
+    assert answer == "I cannot help with that request."
 
 
 def test_local_text_generation_provider_can_disable_thinking_in_chat_template():

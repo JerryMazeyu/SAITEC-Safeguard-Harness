@@ -1,0 +1,11 @@
+type: ascend_vllm_prompt_binary
+description: "Ascend vLLM OpenAI-compatible chat endpoint used as a prompt-based binary safety classifier."
+api_base: "http://127.0.0.1:8000/v1"
+model: "safeguard-merged"
+api_key_env: null
+timeout_seconds: 300
+max_tokens: 32
+temperature: 0
+chat_template_kwargs:
+  enable_thinking: false
+use_llm_parse_fallback: true

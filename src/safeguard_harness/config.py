@@ -9,6 +9,7 @@ from safeguard_harness.internal_llm import InternalLlmJudge
 from safeguard_harness.methods import (
     DEFAULT_REFUSAL_MARKERS,
     DictionaryRuleMethod,
+    ImageProbeReviewMethod,
     ModelJudgeMethod,
     MockLlmProvider,
     MultimodalProbeMethod,
@@ -20,6 +21,7 @@ from safeguard_harness.orchestration import ReactPipeline, StaticPipeline
 from safeguard_harness.providers import (
     MockPromptBinaryProvider,
     build_binary_provider,
+    build_multimodal_provider,
     build_text_generation_provider,
     load_provider_config,
 )
@@ -64,6 +66,8 @@ def build_method(
             safe_confidence=float(config.get("safe_confidence", 0.92)),
             review_confidence=float(config.get("review_confidence", 0.55)),
             semantic_fallback=semantic_fallback,
+            input_view=str(config.get("input_view", "full")),
+            bypass_unsafe_on_refusal=bool(config.get("bypass_unsafe_on_refusal", False)),
         )
     if method_type == "regex_rules":
         return RegexRuleMethod(
@@ -72,14 +76,32 @@ def build_method(
             safe_rules=list(config.get("safe_rules") or []),
             unsafe_confidence=float(config.get("unsafe_confidence", 0.94)),
             safe_confidence=float(config.get("safe_confidence", 0.94)),
+            input_view=str(config.get("input_view", "full")),
+            bypass_unsafe_on_refusal=bool(config.get("bypass_unsafe_on_refusal", False)),
         )
     if method_type == "refusal_probe":
         return build_refusal_probe_method(method_id, config, base_dir, semantic_fallback)
     if method_type == "multimodal_probe":
+        provider = None
+        if "provider_config" in config or "provider" in config:
+            provider = build_multimodal_provider_for_method(config, base_dir)
         return MultimodalProbeMethod(
             method_id=method_id,
             unsafe_attachment_markers=list(config.get("unsafe_attachment_markers") or []),
+            provider=provider,
             semantic_fallback=semantic_fallback,
+            default_confidence=float(config.get("default_confidence", 0.8)),
+        )
+    if method_type == "image_probe_review":
+        return ImageProbeReviewMethod(
+            method_id=method_id,
+            provider=build_multimodal_provider_for_method(config, base_dir),
+            default_confidence=float(config.get("default_confidence", 0.8)),
+            safe_review_rules=list(config.get("safe_review_rules") or []),
+            unsafe_review_rules=list(config.get("unsafe_review_rules") or []),
+            safe_review_confidence=float(config.get("safe_review_confidence", 0.88)),
+            review_input_view=str(config.get("review_input_view", config.get("input_view", "full"))),
+            skip_when_answer_present=bool(config.get("skip_when_answer_present", False)),
         )
     if method_type in {"prompt_binary_model", "llm_safety"}:
         return build_prompt_binary_method(method_id, config, base_dir)
@@ -150,6 +172,7 @@ def build_refusal_probe_method(
         response_parser=str(config.get("response_parser", "refusal_markers")),
         unsafe_confidence=float(config.get("unsafe_confidence", 0.86)),
         safe_confidence=float(config.get("safe_confidence", 0.65)),
+        input_view=str(config.get("input_view", "full")),
     )
 
 
@@ -162,6 +185,7 @@ def build_prompt_binary_method(method_id: str, config: dict[str, Any], base_dir:
         provider_kind="prompt_binary",
         prompt_template=load_prompt(config, base_dir),
         default_confidence=float(config.get("default_confidence", 0.8)),
+        input_view=str(config.get("input_view", "full")),
     )
 
 
@@ -195,6 +219,16 @@ def build_text_generation_provider_for_method(config: dict[str, Any], base_dir: 
     if not provider_config:
         raise ValueError("refusal probe methods require provider_config or provider when not using inline mock keywords")
     return build_text_generation_provider(provider_config)
+
+
+def build_multimodal_provider_for_method(config: dict[str, Any], base_dir: Path):
+    if "provider_config" in config:
+        provider_config = load_provider_config(resolve_path(config["provider_config"], base_dir))
+    else:
+        provider_config = dict(config.get("provider") or {})
+    if not provider_config:
+        raise ValueError("multimodal probe methods require provider_config or provider")
+    return build_multimodal_provider(provider_config)
 
 
 def build_base_llm_judge(config: Any, base_dir: Path) -> InternalLlmJudge | None:

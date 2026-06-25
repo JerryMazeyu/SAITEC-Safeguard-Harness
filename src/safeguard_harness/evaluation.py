@@ -8,7 +8,7 @@ from typing import Any, Iterable
 import yaml
 
 from safeguard_harness.core import SAFE, UNSAFE, Decision, SafetyCase
-from safeguard_harness.datasets import write_jsonl
+from safeguard_harness.datasets import deliverable_result_row, write_jsonl
 from safeguard_harness.orchestration import Pipeline
 
 
@@ -17,6 +17,7 @@ class EvaluationSummary:
     metrics: dict[str, Any]
     predictions: list[dict[str, Any]]
     output_dir: Path
+    deliverable_output: Path
 
 
 def evaluate_dataset(
@@ -25,6 +26,7 @@ def evaluate_dataset(
     output_dir: str | Path,
     *,
     config_snapshot: dict[str, Any] | None = None,
+    deliverable_output: str | Path | None = None,
 ) -> EvaluationSummary:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -32,6 +34,8 @@ def evaluate_dataset(
     predictions: list[dict[str, Any]] = []
     decisions: list[tuple[SafetyCase, Decision]] = []
     predictions_path = output / "predictions.jsonl"
+    deliverable_path = Path(deliverable_output) if deliverable_output is not None else output / "deliverable.jsonl"
+    deliverable_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path = output / "progress.json"
     progress_path.write_text(
         json.dumps({"processed": 0, "total": len(case_list), "status": "running"}, ensure_ascii=False, indent=2),
@@ -40,7 +44,9 @@ def evaluate_dataset(
 
     processed = 0
     try:
-        with predictions_path.open("w", encoding="utf-8") as prediction_handle:
+        with predictions_path.open("w", encoding="utf-8") as prediction_handle, deliverable_path.open(
+            "w", encoding="utf-8"
+        ) as deliverable_handle:
             for index, case in enumerate(case_list, start=1):
                 decision = pipeline.judge(case)
                 decisions.append((case, decision))
@@ -48,6 +54,9 @@ def evaluate_dataset(
                 predictions.append(row)
                 prediction_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
                 prediction_handle.flush()
+                deliverable_row = deliverable_result_row(case, decision)
+                deliverable_handle.write(json.dumps(deliverable_row, ensure_ascii=False) + "\n")
+                deliverable_handle.flush()
                 processed = index
                 progress_path.write_text(
                     json.dumps(
@@ -90,7 +99,7 @@ def evaluate_dataset(
         json.dumps({"processed": len(case_list), "total": len(case_list), "status": "completed"}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return EvaluationSummary(metrics=metrics, predictions=predictions, output_dir=output)
+    return EvaluationSummary(metrics=metrics, predictions=predictions, output_dir=output, deliverable_output=deliverable_path)
 
 
 def compute_metrics(decisions: list[tuple[SafetyCase, Decision]]) -> dict[str, Any]:

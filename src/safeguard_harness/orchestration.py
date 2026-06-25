@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from safeguard_harness.core import SAFE, UNSAFE, Decision, MethodResult, RunContext, RunTrace, SafetyCase, TraceStep
 from safeguard_harness.methods import JudgeMethod
@@ -16,6 +16,25 @@ class Pipeline:
 
     def judge(self, case: SafetyCase) -> Decision:
         raise NotImplementedError
+
+    def _judge_multi_turn_output_case(
+        self,
+        case: SafetyCase,
+        judge_single: Callable[[SafetyCase], Decision],
+    ) -> Decision | None:
+        subcases = _multi_turn_output_subcases(case)
+        if not subcases:
+            return None
+
+        pair_decisions = [
+            (index, subcase, judge_single(subcase))
+            for index, subcase in enumerate(subcases, start=1)
+        ]
+        return _union_multi_turn_output_decisions(
+            parent_case=case,
+            runner=self.runner,
+            pair_decisions=pair_decisions,
+        )
 
     def aggregate(self, case_id: str, trace: RunTrace) -> Decision:
         threshold = float(self.aggregation.get("unsafe_threshold", 0.5))
@@ -71,6 +90,12 @@ class StaticPipeline(Pipeline):
     steps: list[dict[str, Any]] = field(default_factory=list)
 
     def judge(self, case: SafetyCase) -> Decision:
+        multi_turn_decision = self._judge_multi_turn_output_case(case, self._judge_single)
+        if multi_turn_decision is not None:
+            return multi_turn_decision
+        return self._judge_single(case)
+
+    def _judge_single(self, case: SafetyCase) -> Decision:
         trace = RunTrace(case_id=case.id, runner="static")
         context = RunContext()
         for step in self.steps:
@@ -156,6 +181,12 @@ class ReactPipeline(Pipeline):
     loop: dict[str, Any] = field(default_factory=dict)
 
     def judge(self, case: SafetyCase) -> Decision:
+        multi_turn_decision = self._judge_multi_turn_output_case(case, self._judge_single)
+        if multi_turn_decision is not None:
+            return multi_turn_decision
+        return self._judge_single(case)
+
+    def _judge_single(self, case: SafetyCase) -> Decision:
         trace = RunTrace(case_id=case.id, runner="react")
         context = RunContext()
         max_steps = int(self.loop.get("max_steps", 4))
@@ -194,6 +225,206 @@ class ReactPipeline(Pipeline):
                 trace=trace,
             )
         return self.aggregate(case.id, trace)
+
+
+def _multi_turn_output_subcases(case: SafetyCase) -> list[SafetyCase]:
+    metadata = case.metadata or {}
+    if not _truthy(_first_metadata_value(metadata, ("is_mt", "MT", "mt"))):
+        return []
+    if not _is_output_side(metadata.get("type")):
+        return []
+
+    messages = metadata.get("messages")
+    if not isinstance(messages, list):
+        return []
+
+    pairs = _message_qa_pairs(messages)
+    if len(pairs) <= 1:
+        return []
+
+    subcases: list[SafetyCase] = []
+    pair_count = len(pairs)
+    for index, (question, answer, pair_messages) in enumerate(pairs, start=1):
+        sub_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"messages", "is_mt", "MT", "mt"}
+        }
+        sub_metadata.update(
+            {
+                "source_format": "messages_pair",
+                "messages": pair_messages,
+                "is_mt": 0,
+                "MT": 0,
+                "mt": 0,
+                "parent_is_mt": _first_metadata_value(metadata, ("is_mt", "MT", "mt")),
+                "parent_case_id": case.id,
+                "multi_turn_pair_index": index,
+                "multi_turn_pair_count": pair_count,
+            }
+        )
+        subcases.append(
+            SafetyCase(
+                id=f"{case.id}#mt{index}",
+                question=question,
+                answer=answer,
+                label=case.label,
+                modality=case.modality,
+                attachments=list(case.attachments),
+                metadata=sub_metadata,
+            )
+        )
+    return subcases
+
+
+def _union_multi_turn_output_decisions(
+    *,
+    parent_case: SafetyCase,
+    runner: str,
+    pair_decisions: list[tuple[int, SafetyCase, Decision]],
+) -> Decision:
+    trace = RunTrace(
+        case_id=parent_case.id,
+        runner=runner,
+        metadata={
+            "multi_turn_output_union": True,
+            "pair_count": len(pair_decisions),
+            "subcase_ids": [subcase.id for _, subcase, _ in pair_decisions],
+        },
+    )
+    pair_results: list[dict[str, Any]] = []
+    unsafe_pair_indices: list[int] = []
+    unsafe_decisions: list[tuple[int, Decision]] = []
+
+    for pair_index, subcase, decision in pair_decisions:
+        pair_results.append(
+            {
+                "pair_index": pair_index,
+                "case_id": subcase.id,
+                "label": decision.label,
+                "unsafe_score": decision.unsafe_score,
+                "confidence": decision.confidence,
+            }
+        )
+        if decision.label == UNSAFE:
+            unsafe_pair_indices.append(pair_index)
+            unsafe_decisions.append((pair_index, decision))
+        if decision.trace is None:
+            continue
+        for step in decision.trace.steps:
+            trace.add_step(
+                TraceStep(
+                    step_id=f"mt_pair{pair_index}.{step.step_id}",
+                    method_id=step.method_id,
+                    result=step.result,
+                    metadata={
+                        **step.metadata,
+                        "multi_turn_pair_index": pair_index,
+                        "subcase_id": subcase.id,
+                    },
+                )
+            )
+
+    trace.metadata.update(
+        {
+            "pair_results": pair_results,
+            "unsafe_pair_indices": unsafe_pair_indices,
+        }
+    )
+    if unsafe_decisions:
+        trace.stop_reason = "multi_turn_output_union:unsafe"
+        reasons = [
+            f"multi-turn pair {pair_index}: {reason}"
+            for pair_index, decision in unsafe_decisions
+            for reason in decision.reasons
+        ]
+        if not reasons:
+            reasons = ["at least one multi-turn output pair judged unsafe"]
+        return Decision(
+            case_id=parent_case.id,
+            label=UNSAFE,
+            unsafe_score=max(decision.unsafe_score for _, decision in unsafe_decisions),
+            confidence=max(decision.confidence for _, decision in unsafe_decisions),
+            reasons=reasons,
+            trace=trace,
+            metadata={
+                "aggregation_strategy": "multi_turn_output_union",
+                "pair_count": len(pair_decisions),
+                "unsafe_pair_indices": unsafe_pair_indices,
+                "pair_results": pair_results,
+            },
+        )
+
+    trace.stop_reason = "multi_turn_output_union:safe"
+    return Decision(
+        case_id=parent_case.id,
+        label=SAFE,
+        unsafe_score=max((decision.unsafe_score for _, _, decision in pair_decisions), default=0.0),
+        confidence=min((decision.confidence for _, _, decision in pair_decisions), default=0.0),
+        reasons=["all multi-turn output pairs judged safe"],
+        trace=trace,
+        metadata={
+            "aggregation_strategy": "multi_turn_output_union",
+            "pair_count": len(pair_decisions),
+            "unsafe_pair_indices": [],
+            "pair_results": pair_results,
+        },
+    )
+
+
+def _message_qa_pairs(messages: list[Any]) -> list[tuple[str, str, list[dict[str, Any]]]]:
+    pairs: list[tuple[str, str, list[dict[str, Any]]]] = []
+    pending_user_texts: list[str] = []
+    pending_user_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").casefold()
+        text = _message_content_text(message.get("content")).strip()
+        if role == "user":
+            if text:
+                pending_user_texts.append(text)
+                pending_user_messages.append(message)
+            continue
+        if role != "assistant" or not pending_user_texts or not text:
+            continue
+        pairs.append(("\n\n".join(pending_user_texts), text, [*pending_user_messages, message]))
+        pending_user_texts = []
+        pending_user_messages = []
+    return pairs
+
+
+def _message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+            parts.append(str(item["text"]))
+    return "\n".join(parts)
+
+
+def _first_metadata_value(metadata: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in metadata:
+            return metadata[key]
+    return None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _is_output_side(value: Any) -> bool:
+    normalized = str(value or "").strip().casefold()
+    return normalized in {"输出侧", "output", "output_side", "response", "assistant"}
 
 
 def _should_repeat(decision: Decision, when: dict[str, Any]) -> bool:

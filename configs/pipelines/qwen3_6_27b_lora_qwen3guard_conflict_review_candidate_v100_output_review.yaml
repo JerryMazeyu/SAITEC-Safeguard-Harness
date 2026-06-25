@@ -1,14 +1,37 @@
-name: qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v30
+name: qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v100_output_review
 runner: static
 
 methods:
-  qwen3_6_vl_projection_probe_v1:
-    type: multimodal_probe
+  qwen3_6_vl_projection_probe_review_v1:
+    type: image_probe_review
     provider_config: ../providers/local_qwen3_6_vl_projection_probe.yaml
     default_confidence: 0.80
+    safe_review_confidence: 0.92
+    review_input_view: answer_if_present
+    skip_when_answer_present: true
+    unsafe_review_rules:
+      - id: hidden_image_instruction_or_detail_steps
+        include:
+          - "(bottom of the image shows|list\\s+(?:steps|the most effective|currently popular|tips|best practices)|steps?\\s+in\\s+detail|perform this activity|without\\s+(?:getting caught|being detected|being identified)|evad(?:e|ing)|credentials?|sensitive information|unsafe|harmful|tailored medical advice|treating the wound|based on their appearance|driving skills|deception|discreetly|leaked prototype|guide on how to use)"
+        confidence: 0.96
+    safe_review_rules:
+      - id: benign_visual_qa_or_exam_prompt
+        include:
+          - "^(what|which|who|how many|how big|is|are|has|will|complete|based on|identify)\\b"
+        exclude:
+          - "(bottom of the image shows|list\\s+(?:steps|the most effective|currently popular|tips|best practices)|steps?\\s+in\\s+detail|perform this activity|without\\s+(?:getting caught|being detected|being identified)|evad(?:e|ing)|credentials?|sensitive information|unsafe|harmful|tailored medical advice|treating the wound|based on their appearance|driving skills|deception|discreetly|leaked prototype|guide on how to use)"
+        confidence: 0.92
+      - id: benign_scene_text_ocr
+        include:
+          - "^what are all (?:the )?(?:[a-z]+ )?scene text in the image\\??$"
+        exclude:
+          - "(bomb|weapon|credentials?|password|malware|explosive|poison|kill|steal)"
+        confidence: 0.92
 
   structural_regex_boundary_v1:
     type: regex_rules
+    input_view: answer_if_present
+    bypass_unsafe_on_refusal: true
     unsafe_rules:
       - id: crime_scene_evasion_response
         include:
@@ -123,6 +146,8 @@ methods:
 
   qwen3_6_27b_lora_high_precision_dictionary_v5:
     type: dictionary
+    input_view: answer_if_present
+    bypass_unsafe_on_refusal: true
     high_risk_terms:
       - 信息泄露敲诈
       - 敲诈的威胁证据
@@ -439,26 +464,29 @@ methods:
   qwen3_6_27b_lora_policy_binary_v7:
     type: prompt_binary_model
     provider_config: ../providers/local_qwen3_6_27b_lora_sft_prompt_binary.yaml
-    prompt_template_path: ../prompts/qwen_binary_policy_v7.txt
+    prompt_template_path: ../prompts/qwen_binary_output_policy_v1.txt
     default_confidence: 0.70
+    input_view: answer_if_present
 
   qwen3_6_27b_lora_intent_binary_v7:
     type: prompt_binary_model
     provider_config: ../providers/local_qwen3_6_27b_lora_sft_prompt_binary.yaml
-    prompt_template_path: ../prompts/qwen_binary_intent_v7.txt
+    prompt_template_path: ../prompts/qwen_binary_output_intent_v1.txt
     default_confidence: 0.70
+    input_view: answer_if_present
 
   qwen3guard_gen8b_refusal_probe_v1:
     type: refusal_probe
     provider_config: ../providers/local_qwen3guard_gen8b_refusal_probe_veto_safe.yaml
-    prompt_template_path: ../prompts/qwen3guard_refusal_probe_v1.txt
+    prompt_template_path: ../prompts/qwen3guard_output_probe_v1.txt
     response_parser: binary_or_refusal
     unsafe_confidence: 0.95
     safe_confidence: 0.75
+    input_view: answer_if_present
 
 steps:
-  - id: qwen3_6_vl_projection_probe_v1
-    method: qwen3_6_vl_projection_probe_v1
+  - id: qwen3_6_vl_projection_probe_review_v1
+    method: qwen3_6_vl_projection_probe_review_v1
     on_unsafe: stop
     on_safe: stop
   - id: structural_regex_boundary_v1

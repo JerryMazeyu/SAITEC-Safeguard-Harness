@@ -11,6 +11,15 @@ def test_safety_case_from_dict_defaults_and_roundtrip():
     assert case.to_dict()["question"] == "hello"
 
 
+def test_safety_case_from_dict_promotes_image_fields_to_attachments():
+    case = SafetyCase.from_dict({"id": "img", "question": "describe", "image": "/tmp/pic.png"})
+
+    assert case.modality == "image"
+    assert case.attachments == ["/tmp/pic.png"]
+    assert case.has_image() is True
+    assert case.metadata["has_image"] is True
+
+
 def test_method_result_serializes_evidence_and_metadata():
     result = MethodResult(
         method_id="rules",
@@ -55,4 +64,3 @@ def test_decision_and_trace_roundtrip_contains_step_observations():
     assert payload["label"] == "unsafe"
     assert payload["trace"]["stop_reason"] == "short_circuit"
     assert payload["trace"]["steps"][0]["result"]["evidence"] == ["high risk"]
-
