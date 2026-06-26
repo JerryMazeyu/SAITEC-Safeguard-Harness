@@ -379,7 +379,7 @@ provider_config: ../providers/ascend_vllm_safeguard_prompt_binary.yaml
 
 如果要把同一 vLLM 服务接到 `refusal_probe` 或顶层 `base_llm`，使用 `configs/providers/ascend_vllm_safeguard_generation.yaml`，其 `type` 为 `ascend_vllm_chat`，只负责返回生成文本。
 
-`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v101_output_review.yaml` 保持 V100 输出侧复核逻辑不变，只将文本模型 provider 切到昇腾 vLLM：Qwen3.6-27B 二分类判断使用已有 `configs/providers/ascend_vllm_safeguard_prompt_binary.yaml` 的 8000 端口，Qwen3Guard-Gen-8B 拒答复核使用 `configs/providers/ascend_vllm_safeguard_generation_8001.yaml` 的 8001 端口。
+`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v101_output_review.yaml` 保持 V100 输出侧复核逻辑不变，只将文本模型 provider 切到昇腾 vLLM：Qwen3.6-27B 二分类判断使用已有 `configs/providers/ascend_vllm_safeguard_prompt_binary.yaml` 的 8000 端口，Qwen3Guard-Gen-8B 拒答复核使用 `configs/providers/ascend_vllm_safeguard_generation_8001.yaml` 的 8001 端口。V101 的硬规则已外置到 `configs/rules/`：图片复核 regex 使用 `v101_image_probe_review_rules.yaml`，结构化 regex 使用 `v101_structural_regex_rules.yaml`，dictionary 使用 `v101_dictionary_terms.yaml`。pipeline 中只保留 `*_rules_path` / `*_terms_path` 引用，避免人名、作品名、品牌名等验证集指纹直接混进编排文件；dictionary 的 `safe_terms` 暂时收敛为空，边界词放入 `review_terms` 弱信号。
 
 ## 扩展 prompt 二分类模型
 

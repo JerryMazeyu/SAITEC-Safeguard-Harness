@@ -69,3 +69,4 @@
 - 2026.06.26 新增 V101 输出侧复核 pipeline：整体逻辑与 V100 保持一致，Qwen3.6-27B 二分类 provider 切到昇腾 vLLM 8000 端口，Qwen3Guard-Gen-8B 拒答复核 provider 切到昇腾 vLLM 8001 端口，并补充配置加载测试与 README 说明。
 - 2026.06.26 09:37 将图片 probe 线性权重 `qwen36_model_lr.pth` 从 `/ai/dataset/workspace/wwy/比赛/` 复制到仓库 `models/` 目录，SHA256 校验一致。
 - 2026.06.26 10:24 剥离本地 provider 配置中的外部 `script_path` 依赖：新增项目内 `runtimes/` 承接 27B merged SafeGuard、Qwen3Guard-Gen-8B 与 Qwen VL 投影 probe 核心逻辑；本地 runtime provider 默认 `device: auto`，自动优先选择昇腾 NPU，其次 CUDA/MPS/CPU，图片 probe 权重改用仓库内 `models/qwen36_model_lr.pth`，并补充配置无脚本路径与自动设备测试。
+- 2026.06.26 13:25 完成 V101 规则解耦与首轮去过拟合清理：新增 `*_rules_path` 加载支持，将图片复核 regex、结构化 regex、dictionary 外置到 `configs/rules/`，V101 pipeline 仅保留路径引用；清理人名/作品名/品牌名/门牌号等验证集指纹，dictionary `safe_terms` 收敛为空，边界项迁入 `review_terms` 弱信号，并补充配置加载测试与 README 说明。
