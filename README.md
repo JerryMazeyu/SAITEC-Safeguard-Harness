@@ -373,6 +373,8 @@ provider_config: ../providers/ascend_vllm_safeguard_prompt_binary.yaml
 
 如果要把同一 vLLM 服务接到 `refusal_probe` 或顶层 `base_llm`，使用 `configs/providers/ascend_vllm_safeguard_generation.yaml`，其 `type` 为 `ascend_vllm_chat`，只负责返回生成文本。
 
+`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v101_output_review.yaml` 保持 V100 输出侧复核逻辑不变，只将文本模型 provider 切到昇腾 vLLM：Qwen3.6-27B 二分类判断使用已有 `configs/providers/ascend_vllm_safeguard_prompt_binary.yaml` 的 8000 端口，Qwen3Guard-Gen-8B 拒答复核使用 `configs/providers/ascend_vllm_safeguard_generation_8001.yaml` 的 8001 端口。
+
 ## 扩展 prompt 二分类模型
 
 当前 `MockPromptBinaryProvider` 是本地 dry run 适配器。接入生成式安全判别模型时，建议在 provider 层把模型输出解析为统一的二分类结果：`label=0/1`，可选 `confidence`，并把原始响应放入 `raw`。这样无论底层是生成式 LLM 还是 prompt 直出二分类接口，pipeline 里都只表现为 `prompt_binary_model`。

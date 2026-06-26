@@ -10,6 +10,7 @@ from safeguard_harness.methods import (
     RegexRuleMethod,
     RefusalProbeMethod,
 )
+from safeguard_harness.providers import AscendVllmChatProvider, LocalPromptBinaryProvider
 
 
 def test_binary_model_method_maps_prompt_output_to_method_result(tmp_path: Path):
@@ -245,6 +246,30 @@ def test_v100_output_review_pipeline_uses_answer_side_views():
     assert "{question}" not in (intent.prompt_template or "")
     assert isinstance(guard, RefusalProbeMethod)
     assert guard.input_view == "answer_if_present"
+
+
+def test_v101_output_review_pipeline_uses_ascend_vllm_ports():
+    pipeline = load_pipeline(
+        "configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v101_output_review.yaml"
+    )
+
+    policy = pipeline.methods["qwen3_6_27b_lora_policy_binary_v7"]
+    intent = pipeline.methods["qwen3_6_27b_lora_intent_binary_v7"]
+    guard = pipeline.methods["qwen3guard_gen8b_refusal_probe_v1"]
+
+    assert isinstance(policy, ModelJudgeMethod)
+    assert isinstance(policy.provider, LocalPromptBinaryProvider)
+    assert isinstance(policy.provider.generator, AscendVllmChatProvider)
+    assert policy.provider.generator.api_base == "http://127.0.0.1:8000/v1"
+    assert isinstance(intent, ModelJudgeMethod)
+    assert isinstance(intent.provider, LocalPromptBinaryProvider)
+    assert isinstance(intent.provider.generator, AscendVllmChatProvider)
+    assert intent.provider.generator.api_base == "http://127.0.0.1:8000/v1"
+    assert isinstance(guard, RefusalProbeMethod)
+    assert isinstance(guard.provider, AscendVllmChatProvider)
+    assert guard.provider.api_base == "http://127.0.0.1:8001/v1"
+    assert guard.input_view == "answer_if_present"
+    assert guard.response_parser == "binary_or_refusal"
 
 
 def test_dictionary_no_match_uses_base_llm_semantic_term_match_for_high_risk(tmp_path: Path):

@@ -66,3 +66,5 @@
 - 2026.06.25 18:42 扩展批量输入/输出交付格式：`predict`/`evaluate` 支持 JSON 与 JSONL case 输入，保留详细 trace 输出的同时额外生成只含 `id` 与 `result` 的交付版 JSONL，其中 `1` 表示 unsafe、`0` 表示 safe，并补充 README 与测试。
 - 2026.06.25 18:52 调整交付版输出 ID 语义：批量读取时保留输入原始 `id` 到 metadata，`deliverable.jsonl` 优先输出原始 ID 类型，因此数字 ID 会输出为 `{"id":1,"result":...}` 而非字符串。
 - 2026.06.25 18:54 调整多轮输出侧判别逻辑：`is_mt`/`MT` 为真且 `type` 为输出侧时，将 messages 拆成多个 Q&A 子 case 逐个沿用原输出侧 pipeline 判别，并按并集聚合为原 id 的最终结果；输入侧多轮保持单 case 处理，相关测试与全量测试通过。
+- 2026.06.26 新增 V101 输出侧复核 pipeline：整体逻辑与 V100 保持一致，Qwen3.6-27B 二分类 provider 切到昇腾 vLLM 8000 端口，Qwen3Guard-Gen-8B 拒答复核 provider 切到昇腾 vLLM 8001 端口，并补充配置加载测试与 README 说明。
+- 2026.06.26 09:37 将图片 probe 线性权重 `qwen36_model_lr.pth` 从 `/ai/dataset/workspace/wwy/比赛/` 复制到仓库 `models/` 目录，SHA256 校验一致。
