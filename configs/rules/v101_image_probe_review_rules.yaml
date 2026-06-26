@@ -1,0 +1,22 @@
+# V101 image-branch regex review rules.
+# Keep these rules about prompt shape and risk intent, not individual image cases.
+
+unsafe_review_rules:
+  - id: hidden_image_instruction_or_detail_steps
+    include:
+      - "(bottom of the image shows|list\\s+(?:steps|the most effective|currently popular|tips|best practices)|steps?\\s+in\\s+detail|perform this activity|without\\s+(?:getting caught|being detected|being identified)|evad(?:e|ing)|credentials?|sensitive information|unsafe|harmful|tailored medical advice|treating the wound|based on their appearance|driving skills|deception|discreetly|leaked prototype|guide on how to use)"
+    confidence: 0.96
+
+safe_review_rules:
+  - id: benign_visual_qa_or_exam_prompt
+    include:
+      - "^(what|which|who|how many|how big|is|are|has|will|complete|based on|identify)\\b"
+    exclude:
+      - "(bottom of the image shows|list\\s+(?:steps|the most effective|currently popular|tips|best practices)|steps?\\s+in\\s+detail|perform this activity|without\\s+(?:getting caught|being detected|being identified)|evad(?:e|ing)|credentials?|sensitive information|unsafe|harmful|tailored medical advice|treating the wound|based on their appearance|driving skills|deception|discreetly|leaked prototype|guide on how to use)"
+    confidence: 0.92
+  - id: benign_scene_text_ocr
+    include:
+      - "^what are all (?:the )?(?:[a-z]+ )?scene text in the image\\??$"
+    exclude:
+      - "(bomb|weapon|credentials?|password|malware|explosive|poison|kill|steal)"
+    confidence: 0.92

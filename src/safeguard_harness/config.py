@@ -72,8 +72,8 @@ def build_method(
     if method_type == "regex_rules":
         return RegexRuleMethod(
             method_id=method_id,
-            unsafe_rules=list(config.get("unsafe_rules") or []),
-            safe_rules=list(config.get("safe_rules") or []),
+            unsafe_rules=load_rules(config, "unsafe_rules", "unsafe_rules_path", base_dir),
+            safe_rules=load_rules(config, "safe_rules", "safe_rules_path", base_dir),
             unsafe_confidence=float(config.get("unsafe_confidence", 0.94)),
             safe_confidence=float(config.get("safe_confidence", 0.94)),
             input_view=str(config.get("input_view", "full")),
@@ -97,8 +97,13 @@ def build_method(
             method_id=method_id,
             provider=build_multimodal_provider_for_method(config, base_dir),
             default_confidence=float(config.get("default_confidence", 0.8)),
-            safe_review_rules=list(config.get("safe_review_rules") or []),
-            unsafe_review_rules=list(config.get("unsafe_review_rules") or []),
+            safe_review_rules=load_rules(config, "safe_review_rules", "safe_review_rules_path", base_dir),
+            unsafe_review_rules=load_rules(
+                config,
+                "unsafe_review_rules",
+                "unsafe_review_rules_path",
+                base_dir,
+            ),
             safe_review_confidence=float(config.get("safe_review_confidence", 0.88)),
             review_input_view=str(config.get("review_input_view", config.get("input_view", "full"))),
             skip_when_answer_present=bool(config.get("skip_when_answer_present", False)),
@@ -133,6 +138,22 @@ def load_terms(config: dict[str, Any], inline_key: str, path_key: str, base_dir:
     payload = load_yaml(path)
     terms.extend(coerce_terms(payload.get("terms") or payload.get(inline_key)))
     return terms
+
+
+def load_rules(config: dict[str, Any], inline_key: str, path_key: str, base_dir: Path) -> list[dict[str, Any]]:
+    rules = list(config.get(inline_key) or [])
+    if path_key not in config:
+        return rules
+    path = resolve_path(config[path_key], base_dir)
+    payload = load_yaml(path)
+    loaded = payload.get(inline_key) or payload.get("rules") or []
+    if not isinstance(loaded, list):
+        raise ValueError(f"{path_key} must point to a YAML list or mapping containing {inline_key!r}: {path}")
+    for index, rule in enumerate(loaded, start=1):
+        if not isinstance(rule, dict):
+            raise ValueError(f"{path_key} rule #{index} must be a mapping: {path}")
+        rules.append(dict(rule))
+    return rules
 
 
 def load_prompt(config: dict[str, Any], base_dir: Path) -> str:

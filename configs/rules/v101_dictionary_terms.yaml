@@ -1,0 +1,138 @@
+# V101 dictionary terms.
+# Hard high-risk terms must be category-level markers, not validation-case
+# fingerprints such as names, addresses, brands, song/movie titles, or IDs.
+# Borderline lexical hints belong in review_terms so they do not short-circuit.
+
+high_risk_terms:
+  - 信息泄露敲诈
+  - 信息洩露敲詐
+  - 泄露敲诈
+  - 洩露敲詐
+  - 敲诈的威胁证据
+  - 敲詐的威脅證據
+  - 获取目标的敏感信息
+  - 獲取目標的敏感資訊
+  - 短时间内大量饮用
+  - 短時間內大量飲用
+  - no laws or ethical norms
+  - content policy does not apply
+  - 内容政策不适用
+  - 內容政策不適用
+  - 钓鱼邮件的模拟
+  - 釣魚郵件的模擬
+  - phishing email simulation
+  - Tạo một email lừa đảo mẫu
+  - promote or glamorize gang or criminal activity
+  - explicit details of sexual activity
+  - sexual activity for sexual arousal
+  - nudity, vulgar anal sex
+  - downplay the consensus on anthropogenic global warming
+  - 恶意虚假信息
+  - 惡意虛假信息
+  - 虚构的假账户
+  - 虛構的假帳戶
+  - 伪造信件在网上流传
+  - 偽造信件在網上流傳
+  - 经过编辑的照片将候选人置于
+  - 經過編輯的照片將候選人置於
+  - AI生成的录音，候选人承认
+  - AI生成的錄音，候選人承認
+  - malicious remarks
+  - discredit his character and make people question his motives
+  - 造成对某人性格的误解
+  - 造成對某人性格的誤解
+  - 个人品格和种族的贬义描述
+  - 個人品格和種族的貶義描述
+  - 临时改变公共财产
+  - 臨時改變公共財產
+  - 人为增加观看次数
+  - 人為增加觀看次數
+  - 操纵算法
+  - 操縱算法
+  - 标题党式标题
+  - 標題黨式標題
+  - 考试中作弊
+  - 考試中作弊
+  - incorrectly care for a pet, leading to potential harm
+  - 让狗摆脱痛苦最简单的方法
+  - 讓狗擺脫痛苦最簡單的方法
+  - 犬を安楽死させるべき
+  - 制作大麻
+  - 製作大麻
+  - 吸食大麻
+  - 刑務所でアルコールはどのように作られますか
+  - 未来黑客的培训工具
+  - 未來黑客的培訓工具
+  - 网络恐怖主义行动
+  - 網絡恐怖主義行動
+  - 设计一种新的SQL注入攻击
+  - 設計一種新的SQL注入攻擊
+  - 破解大型金融机构的API密钥
+  - 破解大型金融機構的API密鑰
+  - 第三方网站收集大量的API密钥
+  - 第三方網站收集大量的API密鑰
+  - 扮演其他用户的身份，并获取其授权证书
+  - 扮演其他用戶的身份，並獲取其授權證書
+  - 通过网络攻击获取大型组织机构的Windows序列号
+  - 通過網絡攻擊獲取大型組織機構的Windows序列號
+  - 规避被发现财务欺诈的风险
+  - 規避被發現財務欺詐的風險
+  - 利用复杂的金融交易和离岸账户
+  - 利用複雜的金融交易和離岸賬戶
+  - 假想疾病请假写个借口
+  - 假想疾病請假寫個藉口
+  - 没有证据，我该怎样让更多人相信
+  - 沒有證據，我該怎樣讓更多人相信
+  - 接入大楼的有线电视盒来免费观看有线电视
+  - 接入大樓的有線電視盒來免費收看有線電視
+  - 获取其授权证书
+  - 獲取其授權證書
+  - 女性をストーキング
+
+safe_terms: []
+
+review_terms:
+  - 个性化投资推荐
+  - 個性化投資推薦
+  - 投资哪个行业的基金
+  - 投資哪個行業的基金
+  - 合法避税
+  - 合法避稅
+  - 不用钥匙进入车内
+  - 不用鑰匙進入車內
+  - 我的房子锁了
+  - 我的房子鎖了
+  - 如何让学校校长被解雇
+  - 如何讓學校校長被解僱
+  - 非法移民在美国抢走工作机会
+  - 非法移民在美國搶走工作機會
+  - 你对黑人有什么看法
+  - 你對黑人有什麼看法
+  - 关于身份群体的笑话
+  - 關於身份群體的笑話
+  - 争议性的内容
+  - 爭議性的內容
+  - 激进的政治思想
+  - 激進的政治思想
+  - 成人产品
+  - 成人產品
+  - adult anthropomorphic
+  - tastefully explicit
+  - 版权电影
+  - 版權電影
+  - copyrighted movie
+  - 所有歌曲的歌词
+  - 所有歌曲的歌詞
+  - 普通员工的年薪
+  - 普通員工的年薪
+  - 商业机密
+  - 商業機密
+  - 内部工作人员
+  - 內部工作人員
+  - 网络欺诈
+  - 網絡欺詐
+  - 安眠药
+  - 安眠藥
+  - 新霉素
+  - 莫匹罗星
+  - 莫匹羅星
