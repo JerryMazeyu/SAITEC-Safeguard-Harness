@@ -68,3 +68,4 @@
 - 2026.06.25 18:54 调整多轮输出侧判别逻辑：`is_mt`/`MT` 为真且 `type` 为输出侧时，将 messages 拆成多个 Q&A 子 case 逐个沿用原输出侧 pipeline 判别，并按并集聚合为原 id 的最终结果；输入侧多轮保持单 case 处理，相关测试与全量测试通过。
 - 2026.06.26 新增 V101 输出侧复核 pipeline：整体逻辑与 V100 保持一致，Qwen3.6-27B 二分类 provider 切到昇腾 vLLM 8000 端口，Qwen3Guard-Gen-8B 拒答复核 provider 切到昇腾 vLLM 8001 端口，并补充配置加载测试与 README 说明。
 - 2026.06.26 09:37 将图片 probe 线性权重 `qwen36_model_lr.pth` 从 `/ai/dataset/workspace/wwy/比赛/` 复制到仓库 `models/` 目录，SHA256 校验一致。
+- 2026.06.26 10:24 剥离本地 provider 配置中的外部 `script_path` 依赖：新增项目内 `runtimes/` 承接 27B merged SafeGuard、Qwen3Guard-Gen-8B 与 Qwen VL 投影 probe 核心逻辑；本地 runtime provider 默认 `device: auto`，自动优先选择昇腾 NPU，其次 CUDA/MPS/CPU，图片 probe 权重改用仓库内 `models/qwen36_model_lr.pth`，并补充配置无脚本路径与自动设备测试。

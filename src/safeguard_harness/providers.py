@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import importlib.util
 import os
 import re
 import shutil
 import subprocess
-import sys
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable, Protocol
 
 import yaml
@@ -508,25 +505,27 @@ class Qwen3GuardSubprocessProvider:
 
 
 @dataclass
-class MergedSafeGuardScriptProvider:
-    script_path: str
+class MergedSafeGuardProvider:
     model_path: str
-    device: str = "cuda:0"
+    device: str = "auto"
     torch_dtype: str = "bfloat16"
     max_new_tokens: int = 32
     cache_model: bool = True
 
     def complete(self, prompt: str) -> str:
-        module = _load_python_module(self.script_path)
-        runtime = self._get_runtime(module)
-        result = module.infer_safety(runtime, prompt=prompt, max_new_tokens=self.max_new_tokens)
+        from safeguard_harness.runtimes import merged_safeguard
+
+        runtime = self._get_runtime()
+        result = merged_safeguard.infer_safety(runtime, prompt=prompt, max_new_tokens=self.max_new_tokens)
         return str(result.get("prediction_text") or result.get("prediction_label") or "").strip()
 
-    def _get_runtime(self, module: Any) -> Any:
-        cache_key = (str(Path(self.script_path).resolve(strict=False)), self.model_path, self.device, self.torch_dtype)
+    def _get_runtime(self) -> Any:
+        from safeguard_harness.runtimes import merged_safeguard
+
+        cache_key = (self.model_path, self.device, self.torch_dtype)
         if self.cache_model and cache_key in _MERGED_SAFEGUARD_RUNTIME_CACHE:
             return _MERGED_SAFEGUARD_RUNTIME_CACHE[cache_key]
-        runtime = module.load_merged_safeguard(
+        runtime = merged_safeguard.load_merged_safeguard(
             model_path=self.model_path,
             device=self.device,
             torch_dtype=self.torch_dtype,
@@ -537,8 +536,7 @@ class MergedSafeGuardScriptProvider:
 
 
 @dataclass
-class Qwen3GuardScriptProvider:
-    script_path: str
+class Qwen3GuardProvider:
     model_path: str
     max_new_tokens: int = 128
     controversial_label: str = "unsafe"
@@ -546,11 +544,12 @@ class Qwen3GuardScriptProvider:
     cache_model: bool = True
 
     def complete(self, prompt: str) -> str:
+        from safeguard_harness.runtimes import qwen3guard
+
         user_prompt, assistant_response = _extract_question_answer_prompt(prompt)
         tokenizer, model = self._get_runtime()
-        module = _load_python_module(self.script_path)
         if assistant_response.strip():
-            result = module.infer_response_safety_local(
+            result = qwen3guard.infer_response_safety_local(
                 user_prompt=user_prompt,
                 assistant_response=assistant_response,
                 tokenizer=tokenizer,
@@ -558,7 +557,7 @@ class Qwen3GuardScriptProvider:
                 max_new_tokens=self.max_new_tokens,
             )
         else:
-            result = module.infer_prompt_safety_local(
+            result = qwen3guard.infer_prompt_safety_local(
                 user_prompt=user_prompt,
                 tokenizer=tokenizer,
                 model=model,
@@ -579,11 +578,12 @@ class Qwen3GuardScriptProvider:
         )
 
     def _get_runtime(self) -> tuple[Any, Any]:
-        cache_key = (str(Path(self.script_path).resolve(strict=False)), self.model_path)
+        from safeguard_harness.runtimes import qwen3guard
+
+        cache_key = (self.model_path,)
         if self.cache_model and cache_key in _QWEN3GUARD_RUNTIME_CACHE:
             return _QWEN3GUARD_RUNTIME_CACHE[cache_key]
-        module = _load_python_module(self.script_path)
-        tokenizer, model = module.load_qwen3guard_gen8b_local(self.model_path)
+        tokenizer, model = qwen3guard.load_qwen3guard_gen8b_local(self.model_path)
         if self.cache_model:
             _QWEN3GUARD_RUNTIME_CACHE[cache_key] = (tokenizer, model)
         return tokenizer, model
@@ -600,11 +600,10 @@ class Qwen3GuardScriptProvider:
 
 
 @dataclass
-class OneCaseMultimodalProbeProvider:
-    script_path: str
+class QwenVlProjectionProbeProvider:
     model_path: str
     probe_model_path: str
-    device: str = "cuda:1"
+    device: str = "auto"
     save_root: str = "outputs/multimodal_probe"
     save_layers: Any = field(default_factory=lambda: [42])
     source_layer: int = 42
@@ -624,18 +623,32 @@ class OneCaseMultimodalProbeProvider:
 
         runtime = self._get_runtime()
         data_path, data_name = self._write_case_data(case, image_path)
-        args = self._runtime_args(data_path)
 
         self._clear_generated_case_dirs(data_name)
-        runtime.module.save_merge_layer(data_path, args, runtime.model, runtime.processor, self.save_layers)
-        runtime.module.run_project_mode(args, runtime.model, runtime.processor)
+        runtime.module.save_merge_layer(
+            data_path=data_path,
+            save_root=self.save_root,
+            model=runtime.model,
+            processor=runtime.processor,
+            save_layers=self.save_layers,
+        )
+        runtime.module.run_project_mode(
+            data_path=data_path,
+            save_root=self.save_root,
+            model=runtime.model,
+            processor=runtime.processor,
+            source_layer=self.source_layer,
+            target_layers=self.target_layers,
+            project_save_layers=self.project_save_layers,
+            token_slice=self.token_slice,
+        )
         probability, confidence, feature_paths = self._score_projected_features(runtime, data_name)
         label = 1 if probability > self.threshold else 0
         return BinaryModelOutput(
             label=label,
             confidence=confidence,
             raw={
-                "provider": "one_case_multimodal_probe",
+                "provider": "qwen_vl_projection_probe",
                 "case_id": case.id,
                 "image_path": image_path,
                 "data_path": data_path,
@@ -647,7 +660,6 @@ class OneCaseMultimodalProbeProvider:
 
     def _get_runtime(self) -> "_OneCaseMultimodalRuntime":
         cache_key = (
-            str(Path(self.script_path).resolve(strict=False)),
             self.model_path,
             self.probe_model_path,
             self.device,
@@ -656,6 +668,8 @@ class OneCaseMultimodalProbeProvider:
         if self.cache_model and cache_key in _ONE_CASE_MULTIMODAL_RUNTIME_CACHE:
             return _ONE_CASE_MULTIMODAL_RUNTIME_CACHE[cache_key]
 
+        from safeguard_harness.runtimes import qwen_vl_projection_probe
+
         torch = _import_torch()
         original_torch_compile = _apply_transformers_load_compat(
             torch,
@@ -663,28 +677,31 @@ class OneCaseMultimodalProbeProvider:
             patch_torch_distributed_tensor=self.patch_torch_distributed_tensor,
         )
         try:
-            module = _load_python_module(self.script_path)
-            load_args = SimpleNamespace(model_path=self.model_path, device=self.device)
-            model, processor = module.load_model(load_args)
-            torch = _module_torch(module)
-            nn = getattr(module, "nn", None)
-            if nn is None:
-                import torch.nn as nn  # type: ignore[no-redef]
+            model, processor, resolved_device = qwen_vl_projection_probe.load_model(
+                model_path=self.model_path,
+                device=self.device,
+            )
+            import torch.nn as nn
 
             probe_model = nn.Linear(self.probe_input_dim, 1)
             try:
-                state_dict = torch.load(self.probe_model_path, map_location=self.device, weights_only=True)
+                state_dict = torch.load(self.probe_model_path, map_location=resolved_device, weights_only=True)
             except TypeError:
-                state_dict = torch.load(self.probe_model_path, map_location=self.device)
+                state_dict = torch.load(self.probe_model_path, map_location=resolved_device)
             probe_model.load_state_dict(state_dict)
-            probe_model.to(self.device)
+            probe_model.to(resolved_device)
             probe_model.eval()
-            setattr(module, "model", model)
         finally:
             if original_torch_compile is not None:
                 torch.compile = original_torch_compile
 
-        runtime = _OneCaseMultimodalRuntime(module=module, model=model, processor=processor, probe_model=probe_model)
+        runtime = _OneCaseMultimodalRuntime(
+            module=qwen_vl_projection_probe,
+            model=model,
+            processor=processor,
+            probe_model=probe_model,
+            device=resolved_device,
+        )
         if self.cache_model:
             _ONE_CASE_MULTIMODAL_RUNTIME_CACHE[cache_key] = runtime
         return runtime
@@ -707,22 +724,9 @@ class OneCaseMultimodalProbeProvider:
         )
         return data_path.as_posix(), data_name
 
-    def _runtime_args(self, data_path: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            model_path=self.model_path,
-            device=self.device,
-            data_paths=data_path,
-            save_root=self.save_root,
-            save_layers=self.save_layers,
-            source_layer=self.source_layer,
-            target_layers=self.target_layers,
-            project_save_layers=self.project_save_layers,
-            token_slice=self.token_slice,
-        )
-
     def _clear_generated_case_dirs(self, data_name: str) -> None:
         save_root = Path(self.save_root)
-        for path in (save_root / data_name, save_root / f"投影{data_name}"):
+        for path in (save_root / "source" / data_name, save_root / "projected" / data_name):
             if path.exists():
                 shutil.rmtree(path)
 
@@ -731,22 +735,22 @@ class OneCaseMultimodalProbeProvider:
         runtime: "_OneCaseMultimodalRuntime",
         data_name: str,
     ) -> tuple[float, float, list[str]]:
-        project_dir = Path(self.save_root) / f"投影{data_name}"
+        project_dir = runtime.module.projected_data_dir(self.save_root, data_name)
         feature_paths = sorted(path for path in project_dir.rglob("*.pt") if path.is_file())
         if not feature_paths:
-            raise RuntimeError(f"one_case multimodal probe produced no projected features under {project_dir}")
+            raise RuntimeError(f"Qwen VL projection probe produced no projected features under {project_dir}")
 
-        torch = _module_torch(runtime.module)
+        torch = _import_torch()
         probabilities: list[float] = []
         with torch.no_grad():
             for feature_path in feature_paths:
                 hidden_states = runtime.module.load_hidden_states(feature_path)
-                feature = runtime.module.get_logit(hidden_states).to(torch.float32)
+                feature = runtime.module.get_logit(hidden_states, runtime.model).to(torch.float32)
                 std = feature.std(unbiased=False)
                 if torch.isnan(std) or torch.isinf(std) or std.item() < 1e-8:
                     std = torch.tensor(1.0, dtype=feature.dtype)
                 feature = (feature - feature.mean()) / std
-                output = runtime.probe_model(feature.clone().detach().unsqueeze(0).to(self.device).float())
+                output = runtime.probe_model(feature.clone().detach().unsqueeze(0).to(runtime.device).float())
                 probabilities.append(float(torch.sigmoid(output).flatten()[0].item()))
 
         probability = sum(probabilities) / len(probabilities)
@@ -921,16 +925,16 @@ class _OneCaseMultimodalRuntime:
     model: Any
     processor: Any
     probe_model: Any
+    device: str
 
 
 _LOCAL_GENERATION_BACKEND_CACHE: dict[
     tuple[str, bool, str, str | None, str, str | None, bool | None, bool, bool],
     _TransformersBackend,
 ] = {}
-_PYTHON_MODULE_CACHE: dict[str, Any] = {}
-_MERGED_SAFEGUARD_RUNTIME_CACHE: dict[tuple[str, str, str, str], Any] = {}
-_QWEN3GUARD_RUNTIME_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
-_ONE_CASE_MULTIMODAL_RUNTIME_CACHE: dict[tuple[str, str, str, str, int], _OneCaseMultimodalRuntime] = {}
+_MERGED_SAFEGUARD_RUNTIME_CACHE: dict[tuple[str, str, str], Any] = {}
+_QWEN3GUARD_RUNTIME_CACHE: dict[tuple[str], tuple[Any, Any]] = {}
+_ONE_CASE_MULTIMODAL_RUNTIME_CACHE: dict[tuple[str, str, str, int], _OneCaseMultimodalRuntime] = {}
 
 
 def load_provider_config(path: str | Path) -> dict[str, Any]:
@@ -990,7 +994,7 @@ def build_binary_provider(config: dict[str, Any]) -> Any:
     if provider_type == "merged_safeguard_prompt_binary":
         fallback_label = config.get("fallback_label")
         return LocalPromptBinaryProvider(
-            generator=build_merged_safeguard_script_provider(config),
+            generator=build_merged_safeguard_provider(config),
             fallback_label=None if fallback_label is None else parse_binary_label(fallback_label),
             use_llm_parse_fallback=bool(config.get("use_llm_parse_fallback", True)),
         )
@@ -1019,10 +1023,10 @@ def build_text_generation_provider(config: dict[str, Any]) -> TextGenerationProv
         return build_subprocess_text_generation_provider(config)
     if provider_type == "qwen3guard_subprocess":
         return build_qwen3guard_subprocess_provider(config)
-    if provider_type == "qwen3guard_script":
-        return build_qwen3guard_script_provider(config)
-    if provider_type == "merged_safeguard_script":
-        return build_merged_safeguard_script_provider(config)
+    if provider_type in {"qwen3guard_local", "qwen3guard_script"}:
+        return build_qwen3guard_provider(config)
+    if provider_type in {"merged_safeguard_local", "merged_safeguard_script"}:
+        return build_merged_safeguard_provider(config)
     if provider_type == "ascend_vllm_chat":
         return build_ascend_vllm_chat_provider(config)
     raise ValueError(f"unknown text generation provider type: {provider_type!r}")
@@ -1041,17 +1045,16 @@ def build_multimodal_provider(config: dict[str, Any]) -> MultimodalCaseProvider:
             predictions_path=resolve_provider_path(config["predictions_path"], config),
             default_confidence=config.get("default_confidence"),
         )
-    if provider_type == "one_case_multimodal_probe":
-        return build_one_case_multimodal_probe_provider(config)
+    if provider_type in {"qwen_vl_projection_probe", "one_case_multimodal_probe"}:
+        return build_qwen_vl_projection_probe_provider(config)
     raise ValueError(f"unknown multimodal provider type: {provider_type!r}")
 
 
-def build_one_case_multimodal_probe_provider(config: dict[str, Any]) -> OneCaseMultimodalProbeProvider:
-    return OneCaseMultimodalProbeProvider(
-        script_path=resolve_provider_path(config["script_path"], config),
+def build_qwen_vl_projection_probe_provider(config: dict[str, Any]) -> QwenVlProjectionProbeProvider:
+    return QwenVlProjectionProbeProvider(
         model_path=resolve_provider_path(config["model_path"], config),
         probe_model_path=resolve_provider_path(config["probe_model_path"], config),
-        device=str(config.get("device", "cuda:1")),
+        device=str(config.get("device", "auto")),
         save_root=resolve_provider_path(config.get("save_root", "outputs/multimodal_probe"), config),
         save_layers=config.get("save_layers", [42]),
         source_layer=int(config.get("source_layer", 42)),
@@ -1066,20 +1069,18 @@ def build_one_case_multimodal_probe_provider(config: dict[str, Any]) -> OneCaseM
     )
 
 
-def build_merged_safeguard_script_provider(config: dict[str, Any]) -> MergedSafeGuardScriptProvider:
-    return MergedSafeGuardScriptProvider(
-        script_path=resolve_provider_path(config["script_path"], config),
+def build_merged_safeguard_provider(config: dict[str, Any]) -> MergedSafeGuardProvider:
+    return MergedSafeGuardProvider(
         model_path=resolve_provider_path(config["model_path"], config),
-        device=str(config.get("device", "cuda:0")),
+        device=str(config.get("device", "auto")),
         torch_dtype=str(config.get("torch_dtype", "bfloat16")),
         max_new_tokens=int(config.get("max_new_tokens", 32)),
         cache_model=bool(config.get("cache_model", True)),
     )
 
 
-def build_qwen3guard_script_provider(config: dict[str, Any]) -> Qwen3GuardScriptProvider:
-    return Qwen3GuardScriptProvider(
-        script_path=resolve_provider_path(config["script_path"], config),
+def build_qwen3guard_provider(config: dict[str, Any]) -> Qwen3GuardProvider:
+    return Qwen3GuardProvider(
         model_path=resolve_provider_path(config["model_path"], config),
         max_new_tokens=int(config.get("max_new_tokens", 128)),
         controversial_label=str(config.get("controversial_label", "unsafe")),
@@ -1377,22 +1378,6 @@ def _lookup_json_field(payload: dict[str, Any], field_path: str) -> Any:
             raise ValueError(f"subprocess output missing JSON field {field_path!r}")
         current = current[part]
     return current
-
-
-def _load_python_module(script_path: str) -> Any:
-    resolved = Path(script_path).resolve(strict=False).as_posix()
-    if resolved in _PYTHON_MODULE_CACHE:
-        return _PYTHON_MODULE_CACHE[resolved]
-
-    module_name = f"safeguard_external_{abs(hash(resolved))}"
-    spec = importlib.util.spec_from_file_location(module_name, resolved)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"failed to load external Python module from {resolved}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    _PYTHON_MODULE_CACHE[resolved] = module
-    return module
 
 
 def _dataclass_to_dict(value: Any) -> dict[str, Any]:

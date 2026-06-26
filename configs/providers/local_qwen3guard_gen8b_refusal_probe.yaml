@@ -1,6 +1,5 @@
-type: qwen3guard_script
-description: "Qwen3Guard-Gen-8B refusal-mode guard served through the external qwen3guard_gen8b_local_infer.py script."
-script_path: /ai/dataset/workspace/czy/LLaMA-Factory/SafeGuard/qwen3guard_gen8b_local_infer.py
+type: qwen3guard_local
+description: "Qwen3Guard-Gen-8B refusal-mode guard served by the project-owned runtime adapter."
 model_path: /ai/dataset/workspace/czy/model/Qwen3Guard-Gen-8B
 max_new_tokens: 128
 controversial_label: unsafe

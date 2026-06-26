@@ -8,9 +8,12 @@ from safeguard_harness.providers import (
     AscendVllmChatProvider,
     BinaryModelOutput,
     ClassifierHeadApiProvider,
+    MergedSafeGuardProvider,
     LocalTextGenerationProvider,
     LocalPromptBinaryProvider,
     PromptBinaryApiProvider,
+    Qwen3GuardProvider,
+    QwenVlProjectionProbeProvider,
     SubprocessTextGenerationProvider,
     _extract_question_answer_prompt,
     build_binary_provider,
@@ -168,6 +171,48 @@ def test_build_ascend_vllm_providers_from_config():
     assert binary_provider.generator.chat_template_kwargs == {"enable_thinking": False}
     assert isinstance(text_provider, AscendVllmChatProvider)
     assert text_provider.chat_template_kwargs is None
+
+
+def test_project_owned_runtime_provider_configs_do_not_expose_script_paths():
+    provider_names = [
+        "local_qwen3_6_27b_lora_sft_prompt_binary.yaml",
+        "local_qwen3guard_gen8b_refusal_probe.yaml",
+        "local_qwen3guard_gen8b_refusal_probe_veto_safe.yaml",
+        "local_qwen3_6_vl_projection_probe.yaml",
+    ]
+
+    for provider_name in provider_names:
+        config = load_provider_config(Path("configs/providers") / provider_name)
+        assert "script_path" not in config
+
+
+def test_project_owned_runtime_providers_default_to_auto_device():
+    binary_provider = build_binary_provider(
+        {
+            "type": "merged_safeguard_prompt_binary",
+            "model_path": "/models/merged-safeguard",
+        }
+    )
+    guard_provider = build_text_generation_provider(
+        {
+            "type": "qwen3guard_local",
+            "model_path": "/models/qwen3guard",
+        }
+    )
+    image_provider = build_multimodal_provider(
+        {
+            "type": "qwen_vl_projection_probe",
+            "model_path": "/models/qwen-vl",
+            "probe_model_path": "models/qwen36_model_lr.pth",
+        }
+    )
+
+    assert isinstance(binary_provider, LocalPromptBinaryProvider)
+    assert isinstance(binary_provider.generator, MergedSafeGuardProvider)
+    assert binary_provider.generator.device == "auto"
+    assert isinstance(guard_provider, Qwen3GuardProvider)
+    assert isinstance(image_provider, QwenVlProjectionProbeProvider)
+    assert image_provider.device == "auto"
 
 
 def test_build_mock_multimodal_provider_scores_case_attachments():

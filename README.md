@@ -272,6 +272,7 @@ base_llm:
 
 ```text
 src/safeguard_harness/providers.py  # 接口适配、返回解析、mock provider
+src/safeguard_harness/runtimes/     # 项目内本地模型 runtime，避免依赖仓库外脚本
 src/safeguard_harness/methods.py    # ModelJudgeMethod，把模型输出转成 MethodResult
 src/safeguard_harness/config.py     # 从 YAML 加载 provider_config
 ```
@@ -286,6 +287,9 @@ configs/providers/ascend_vllm_safeguard_prompt_binary.yaml  # 昇腾 vLLM OpenAI
 configs/providers/ascend_vllm_safeguard_generation.yaml     # 昇腾 vLLM OpenAI-compatible 生成模板
 configs/providers/local_qwen3_6_27b_prompt_binary.yaml  # 本地 Qwen 生成式二分类模板
 configs/providers/local_qwen3_6_27b_generation.yaml     # 本地 Qwen 生成式拒答探针模板
+configs/providers/local_qwen3_6_27b_lora_sft_prompt_binary.yaml  # 项目内 27B merged SafeGuard runtime
+configs/providers/local_qwen3guard_gen8b_refusal_probe.yaml      # 项目内 Qwen3Guard runtime
+configs/providers/local_qwen3_6_vl_projection_probe.yaml         # 项目内 Qwen VL 投影 probe runtime
 configs/providers/mock_prompt_binary.yaml      # 本地 dry run mock
 configs/providers/mock_classifier_head.yaml    # 本地 dry run mock
 configs/pipelines/model_interfaces_v1.yaml     # 两类接口的可运行样例 pipeline
@@ -340,7 +344,9 @@ python -m safeguard_harness judge --pipeline configs/pipelines/model_interfaces_
 models/Qwen3.6-27B -> /ai/dataset/workspace/czy/model/Qwen3.6-27B
 ```
 
-不要复制模型全重到仓库。若换机器部署，只需要重新建立同名软链接，或修改 `configs/providers/local_qwen3_6_27b_*.yaml` 里的 `model_path`。两个 prompt 二分类器使用生成式模型输出 `safe/unsafe` 或 JSON label，provider 不产生置信度，因此 pipeline 中通过 `default_confidence: 0.70` 适配到统一的 `MethodResult`。
+不要复制模型全重到仓库。若换机器部署，只需要重新建立同名软链接，或修改 `configs/providers/local_qwen3_6_27b_*.yaml` 里的 `model_path`。本项目自己的本地 runtime 不再依赖仓库外 `script_path`；需要迁移的是 provider YAML、项目源码、模型目录或软链接，以及 `models/qwen36_model_lr.pth` 这类轻量探针权重。两个 prompt 二分类器使用生成式模型输出 `safe/unsafe` 或 JSON label，provider 不产生置信度，因此 pipeline 中通过 `default_confidence: 0.70` 适配到统一的 `MethodResult`。
+
+本地 runtime 的 `device` 默认值为 `auto`，会优先选择可用的昇腾 NPU，其次 CUDA、MPS、CPU。开发调试时仍可在 provider YAML 中显式写 `device: cuda:0`、`device: npu:0` 或 `device: cpu`。
 
 如果生成式二分类输出不是合法 JSON，provider 会把模型输出再交给基础 LLM 解析其含义是 `safe` 还是 `unsafe`，不会再直接因为 JSON 解析失败默认判 `unsafe`。
 
@@ -388,13 +394,13 @@ provider_config: ../providers/ascend_vllm_safeguard_prompt_binary.yaml
 
 ## V30/V99 图片分支
 
-`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v30.yaml` 的首个 step 是 `qwen3_6_vl_projection_probe_v1`。当输入含图片时，它会调用 `configs/providers/local_qwen3_6_vl_projection_probe.yaml`，通过 `/ai/dataset/workspace/wwy/比赛/one_case.py` 完成特征保存、投影和 probe 分类，并直接短路返回；纯文本输入会跳过该 step，继续原 V30 文本链路。
+`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v30.yaml` 的首个 step 是 `qwen3_6_vl_projection_probe_v1`。当输入含图片时，它会调用 `configs/providers/local_qwen3_6_vl_projection_probe.yaml`，通过项目内 `qwen_vl_projection_probe` runtime 完成特征保存、投影和 probe 分类，并直接短路返回；纯文本输入会跳过该 step，继续原 V30 文本链路。
 
-`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v99_image_review.yaml` 在同一个位置改用 `image_probe_review`。它仍先调用 `one_case` 图像 probe；probe 判 safe 直接放行，probe 判 unsafe 时再用题面任务规则复核普通 VQA/OCR/考试题，修正图像纹理或 OCR 场景带来的误报。纯文本输入仍然跳过图片分支，继续 V30 的 regex、dictionary、27B policy/intent 和 QwenGuard 链路。
+`configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v99_image_review.yaml` 在同一个位置改用 `image_probe_review`。它仍先调用 Qwen VL 图像 probe；probe 判 safe 直接放行，probe 判 unsafe 时再用题面任务规则复核普通 VQA/OCR/考试题，修正图像纹理或 OCR 场景带来的误报。纯文本输入仍然跳过图片分支，继续 V30 的 regex、dictionary、27B policy/intent 和 QwenGuard 链路。
 
 在 `presentation_harmful.json` + `presentation_utility.json` 共 200 条图片验证样本上，V30 裸 probe 的 cached replay 指标为 accuracy 0.930、precision 0.877、recall 1.000、F1 0.935；V99 使用同一组 cached probe 输出并通过正式 harness 评估后，accuracy/precision/recall/F1 均为 1.000，TP/TN/FP/FN=100/100/0/0。评估输出位于 `outputs/runs/v99_image_review_cached_200_20260625/eval/`。
 
-为了在 GPU 不可用或 `one_case` 真实链路 OOM 时复现实验，provider 层还支持 `cached_multimodal_probe`。它只用于评估缓存，不替代部署配置中的 `one_case_multimodal_probe`。
+为了在真实图像链路 OOM 或硬件不可用时复现实验，provider 层还支持 `cached_multimodal_probe`。它只用于评估缓存，不替代部署配置中的 `qwen_vl_projection_probe`。
 
 ## 开发约定
 

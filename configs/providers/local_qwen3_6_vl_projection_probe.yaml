@@ -1,9 +1,8 @@
-type: one_case_multimodal_probe
-description: "Qwen3.6 VL hidden-state projection probe via /ai/dataset/workspace/wwy/比赛/one_case.py."
-script_path: /ai/dataset/workspace/wwy/比赛/one_case.py
+type: qwen_vl_projection_probe
+description: "Qwen3.6 VL hidden-state projection probe served by the project-owned runtime adapter."
 model_path: /ai/dataset/models/Qwen3.6-27B
-probe_model_path: /ai/dataset/workspace/wwy/比赛/qwen36_model_lr.pth
-device: cuda:1
+probe_model_path: ../../models/qwen36_model_lr.pth
+device: auto
 save_root: ../../outputs/multimodal_probe/qwen3_6_vl_projection
 save_layers: [42]
 source_layer: 42
