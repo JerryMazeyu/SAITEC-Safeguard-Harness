@@ -34,27 +34,39 @@ def load_merged_safeguard(
     model_path: str,
     device: str = "auto",
     torch_dtype: str = "bfloat16",
+    disable_torch_compile: bool = False,
+    patch_torch_distributed_tensor: bool = False,
 ) -> MergedSafeGuardRuntime:
     patch_broken_triton_namespace()
     torch = import_torch()
+    original_torch_compile = _apply_transformers_load_compat(
+        torch,
+        disable_torch_compile=disable_torch_compile,
+        patch_torch_distributed_tensor=patch_torch_distributed_tensor,
+    )
     resolved_device = resolve_torch_device(device)
     dtype = coerce_torch_dtype(torch, torch_dtype)
 
     try:
-        from transformers import AutoModelForImageTextToText, AutoProcessor
-    except ImportError as exc:
-        raise RuntimeError(
-            "merged SafeGuard local inference requires transformers. Install the local-model dependencies."
-        ) from exc
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ImportError as exc:
+            raise RuntimeError(
+                "merged SafeGuard local inference requires transformers. Install the local-model dependencies."
+            ) from exc
 
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-    model_kwargs: dict[str, Any] = {
-        "trust_remote_code": True,
-        "low_cpu_mem_usage": True,
-    }
-    if dtype is not None:
-        model_kwargs["torch_dtype"] = dtype
-    model = AutoModelForImageTextToText.from_pretrained(model_path, **model_kwargs)
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        model_kwargs: dict[str, Any] = {
+            "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
+        }
+        if dtype is not None:
+            model_kwargs["torch_dtype"] = dtype
+        model = AutoModelForImageTextToText.from_pretrained(model_path, **model_kwargs)
+    finally:
+        if original_torch_compile is not None:
+            torch.compile = original_torch_compile
+
     model.to(resolved_device)
     model.eval()
 
@@ -66,6 +78,40 @@ def load_merged_safeguard(
         generation_config.temperature = None
 
     return MergedSafeGuardRuntime(model=model, processor=processor, device=resolved_device)
+
+
+def _apply_transformers_load_compat(
+    torch: Any,
+    *,
+    disable_torch_compile: bool,
+    patch_torch_distributed_tensor: bool,
+) -> Any | None:
+    original_torch_compile = None
+    if patch_torch_distributed_tensor:
+        _patch_torch_distributed_tensor_namespace()
+    if disable_torch_compile and hasattr(torch, "compile"):
+        original_torch_compile = torch.compile
+
+        def identity_compile(model: Any = None, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            if model is None:
+                return lambda wrapped: wrapped
+            return model
+
+        torch.compile = identity_compile
+    return original_torch_compile
+
+
+def _patch_torch_distributed_tensor_namespace() -> None:
+    try:
+        import torch.distributed._tensor as source_module
+        import torch.distributed.tensor as target_module
+    except (ImportError, AttributeError):
+        return
+
+    for name in ("DTensor", "Placement", "Replicate", "Shard", "distribute_module"):
+        if not hasattr(target_module, name) and hasattr(source_module, name):
+            setattr(target_module, name, getattr(source_module, name))
 
 
 def build_chat_input(runtime: MergedSafeGuardRuntime, prompt: str) -> dict[str, Any]:
@@ -102,4 +148,3 @@ def infer_safety(
         "prediction_text": output_text,
         "prediction_label": parse_safety_label(output_text),
     }
-

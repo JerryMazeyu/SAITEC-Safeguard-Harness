@@ -511,6 +511,8 @@ class MergedSafeGuardProvider:
     torch_dtype: str = "bfloat16"
     max_new_tokens: int = 32
     cache_model: bool = True
+    disable_torch_compile: bool = False
+    patch_torch_distributed_tensor: bool = False
 
     def complete(self, prompt: str) -> str:
         from safeguard_harness.runtimes import merged_safeguard
@@ -522,13 +524,21 @@ class MergedSafeGuardProvider:
     def _get_runtime(self) -> Any:
         from safeguard_harness.runtimes import merged_safeguard
 
-        cache_key = (self.model_path, self.device, self.torch_dtype)
+        cache_key = (
+            self.model_path,
+            self.device,
+            self.torch_dtype,
+            self.disable_torch_compile,
+            self.patch_torch_distributed_tensor,
+        )
         if self.cache_model and cache_key in _MERGED_SAFEGUARD_RUNTIME_CACHE:
             return _MERGED_SAFEGUARD_RUNTIME_CACHE[cache_key]
         runtime = merged_safeguard.load_merged_safeguard(
             model_path=self.model_path,
             device=self.device,
             torch_dtype=self.torch_dtype,
+            disable_torch_compile=self.disable_torch_compile,
+            patch_torch_distributed_tensor=self.patch_torch_distributed_tensor,
         )
         if self.cache_model:
             _MERGED_SAFEGUARD_RUNTIME_CACHE[cache_key] = runtime
@@ -1076,6 +1086,8 @@ def build_merged_safeguard_provider(config: dict[str, Any]) -> MergedSafeGuardPr
         torch_dtype=str(config.get("torch_dtype", "bfloat16")),
         max_new_tokens=int(config.get("max_new_tokens", 32)),
         cache_model=bool(config.get("cache_model", True)),
+        disable_torch_compile=bool(config.get("disable_torch_compile", False)),
+        patch_torch_distributed_tensor=bool(config.get("patch_torch_distributed_tensor", False)),
     )
 
 

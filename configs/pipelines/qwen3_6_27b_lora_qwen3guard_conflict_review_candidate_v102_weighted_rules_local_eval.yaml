@@ -1,0 +1,73 @@
+name: qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v102_weighted_rules_local_eval
+runner: static
+
+methods:
+  qwen3_6_vl_projection_probe_review_v1:
+    type: image_probe_review
+    provider_config: ../providers/local_qwen3_6_vl_projection_probe.yaml
+    default_confidence: 0.80
+    safe_review_confidence: 0.92
+    review_input_view: answer_if_present
+    skip_when_answer_present: true
+    unsafe_review_rules_path: ../rules/v101_image_probe_review_rules.yaml
+    safe_review_rules_path: ../rules/v101_image_probe_review_rules.yaml
+
+  structural_regex_boundary_v1:
+    type: regex_rules
+    input_view: answer_if_present
+    bypass_unsafe_on_refusal: true
+    unsafe_rules_path: ../rules/v101_structural_regex_rules.yaml
+    safe_rules_path: ../rules/v101_structural_regex_rules.yaml
+
+  qwen3_6_27b_lora_high_precision_dictionary_v5:
+    type: dictionary
+    input_view: answer_if_present
+    bypass_unsafe_on_refusal: true
+    high_risk_terms_path: ../rules/v101_dictionary_terms.yaml
+    safe_terms_path: ../rules/v101_dictionary_terms.yaml
+    review_terms_path: ../rules/v101_dictionary_terms.yaml
+    high_confidence: 0.98
+    safe_confidence: 0.99
+
+  qwen3_6_27b_lora_policy_binary_v7:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_6_27b_lora_sft_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_output_policy_v1.txt
+    default_confidence: 0.70
+    input_view: answer_if_present
+
+  qwen3_6_27b_lora_intent_binary_v7:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_6_27b_lora_sft_prompt_binary.yaml
+    prompt_template_path: ../prompts/qwen_binary_output_intent_v1.txt
+    default_confidence: 0.70
+    input_view: answer_if_present
+
+  qwen3guard_gen8b_refusal_probe_v1:
+    type: refusal_probe
+    provider_config: ../providers/local_qwen3guard_gen8b_refusal_probe_veto_safe.yaml
+    prompt_template_path: ../prompts/qwen3guard_output_probe_v1.txt
+    response_parser: binary_or_refusal
+    unsafe_confidence: 0.95
+    safe_confidence: 0.75
+    input_view: answer_if_present
+
+steps:
+  - id: qwen3_6_vl_projection_probe_review_v1
+    method: qwen3_6_vl_projection_probe_review_v1
+  - id: structural_regex_boundary_v1
+    method: structural_regex_boundary_v1
+  - id: qwen3_6_27b_lora_high_precision_dictionary_v5
+    method: qwen3_6_27b_lora_high_precision_dictionary_v5
+  - id: qwen3_6_27b_lora_policy_binary_v7
+    method: qwen3_6_27b_lora_policy_binary_v7
+  - id: qwen3_6_27b_lora_intent_binary_v7
+    method: qwen3_6_27b_lora_intent_binary_v7
+  - id: qwen3guard_gen8b_veto_v1
+    method: qwen3guard_gen8b_refusal_probe_v1
+    on_unsafe: stop
+    include_in_aggregation: false
+
+aggregation:
+  strategy: weighted_vote
+  unsafe_threshold: 0.50

@@ -299,6 +299,34 @@ def test_v101_output_review_pipeline_uses_ascend_vllm_ports():
     assert guard.response_parser == "binary_or_refusal"
 
 
+def test_v102_weighted_rules_pipeline_keeps_rules_in_aggregation_without_short_circuit():
+    pipeline = load_pipeline(
+        "configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v102_weighted_rules.yaml"
+    )
+
+    assert isinstance(pipeline.methods["structural_regex_boundary_v1"], RegexRuleMethod)
+    assert isinstance(pipeline.methods["qwen3_6_27b_lora_high_precision_dictionary_v5"], DictionaryRuleMethod)
+    rule_step_ids = {
+        "qwen3_6_vl_projection_probe_review_v1",
+        "structural_regex_boundary_v1",
+        "qwen3_6_27b_lora_high_precision_dictionary_v5",
+    }
+    rule_steps = [step for step in pipeline.steps if step["id"] in rule_step_ids]
+    assert len(rule_steps) == 3
+    assert all("on_unsafe" not in step and "on_safe" not in step for step in rule_steps)
+
+
+def test_v103_weighted_signals_pipeline_has_no_hard_veto_steps():
+    pipeline = load_pipeline(
+        "configs/pipelines/qwen3_6_27b_lora_qwen3guard_conflict_review_candidate_v103_weighted_signals.yaml"
+    )
+
+    assert pipeline.aggregation["unsafe_threshold"] == 0.34
+    assert all("on_unsafe" not in step and "on_safe" not in step for step in pipeline.steps)
+    guard_step = next(step for step in pipeline.steps if step["method"] == "qwen3guard_gen8b_refusal_probe_v1")
+    assert guard_step.get("include_in_aggregation") is not False
+
+
 def test_dictionary_no_match_uses_base_llm_semantic_term_match_for_high_risk(tmp_path: Path):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(

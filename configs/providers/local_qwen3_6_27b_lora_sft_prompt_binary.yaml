@@ -6,3 +6,5 @@ torch_dtype: bfloat16
 max_new_tokens: 32
 cache_model: true
 use_llm_parse_fallback: true
+disable_torch_compile: true
+patch_torch_distributed_tensor: true
