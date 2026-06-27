@@ -1,7 +1,7 @@
 type: qwen_vl_prompt_binary
 description: "Direct Qwen3.6-27B VL base-model binary safety judge for image cases."
-model_path: /data/models/Qwen36-27B
-device: auto
+model_path: /data/model/Qwen36-27B
+device: npu:1
 max_new_tokens: 256
 cache_model: true
 disable_torch_compile: true

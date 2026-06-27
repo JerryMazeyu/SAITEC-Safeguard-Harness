@@ -1,6 +1,6 @@
 type: local_text_generation_lm
 description: "Local Qwen3.6-27B generative model used by refusal probes."
-model_path: /data/model/Qwen36-27B-SFT
+model_path: /data/model/Qwen36-27B
 trust_remote_code: true
 device: npu:1
 device_map: null
