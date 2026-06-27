@@ -1,7 +1,7 @@
 type: merged_safeguard_prompt_binary
 description: "Qwen3.6-27B SafeGuard LoRA SFT merged model served by the project-owned runtime adapter."
-model_path: /ai/dataset/workspace/czy/model/Qwen3.6-27B-SafeGuard-strategy2-plus-manage-r1-safety-only-lang-1to1-content-zh80-translated-checkpoint-3141-merged
-device: auto
+model_path: /data/model/Qwen36-27B-SFT
+device: npu:1
 torch_dtype: bfloat16
 max_new_tokens: 32
 cache_model: true

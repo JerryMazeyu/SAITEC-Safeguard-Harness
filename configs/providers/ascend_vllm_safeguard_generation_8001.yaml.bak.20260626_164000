@@ -1,7 +1,7 @@
 type: ascend_vllm_chat
 description: "Ascend vLLM OpenAI-compatible chat endpoint used by refusal probes or base LLM semantic fallback."
 api_base: "http://127.0.0.1:8001/v1"
-model: "qwen3guard-8b"
+model: "safeguard-merged"
 api_key_env: null
 timeout_seconds: 300
 max_tokens: 128
