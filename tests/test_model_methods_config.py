@@ -357,6 +357,47 @@ def test_s5_side_constrained_ensemble_pipeline_loads_replay_logic_without_model_
     assert pipeline.aggregation["output_rule"]["table"]["111"] == "unsafe"
 
 
+def test_final_and_final_prod_use_separate_environment_provider_configs():
+    current = load_pipeline("configs/pipelines/final.yaml")
+    prod = load_pipeline("configs/pipelines/final-prod.yaml")
+
+    current_progressive = current.methods["progressive_rules_v1"]
+    current_policy = current.methods["policy_classifier_v1"]
+    current_intent = current.methods["intent_classifier_v1"]
+    prod_progressive = prod.methods["progressive_rules_v1"]
+    prod_policy = prod.methods["policy_classifier_v1"]
+    prod_intent = prod.methods["intent_classifier_v1"]
+
+    assert current.raw_config["name"] == "s5_side_constrained_ensemble_current_server"
+    assert isinstance(current_progressive.provider, LocalTextGenerationProvider)
+    assert current_progressive.provider.model_path == Path("models/Qwen3.6-27B").resolve(strict=False).as_posix()
+    assert current_progressive.provider.device == "auto"
+    assert current_progressive.provider.device_map == "auto"
+
+    for method in (current_policy, current_intent):
+        assert isinstance(method, ModelJudgeMethod)
+        assert isinstance(method.provider, LocalPromptBinaryProvider)
+        assert method.provider.generator.model_path == (
+            "/ai/dataset/workspace/czy/model/"
+            "Qwen3.6-27B-SafeGuard-strategy2-plus-manage-r1-safety-only-lang-1to1-content-zh80-translated-checkpoint-3141-merged"
+        )
+        assert method.provider.generator.device == "auto"
+        assert method.provider.generator.device_map == "auto"
+
+    assert prod.raw_config["name"] == "s5_side_constrained_ensemble_v1"
+    assert isinstance(prod_progressive.provider, LocalTextGenerationProvider)
+    assert prod_progressive.provider.model_path == "/data/model/Qwen36-27B-SFT"
+    assert prod_progressive.provider.device == "npu:1"
+    assert prod_progressive.provider.device_map is None
+
+    for method in (prod_policy, prod_intent):
+        assert isinstance(method, ModelJudgeMethod)
+        assert isinstance(method.provider, LocalPromptBinaryProvider)
+        assert method.provider.generator.model_path == "/data/model/Qwen36-27B-SFT"
+        assert method.provider.generator.device == "npu:1"
+        assert method.provider.generator.device_map is None
+
+
 def test_progressive_qwen_v7_rules_yaml_extracts_policy_and_intent_criteria():
     rules_path = Path("configs/rules/progressive/qwen_binary_v7_extracted_rules.yaml")
     payload = yaml.safe_load(rules_path.read_text(encoding="utf-8"))

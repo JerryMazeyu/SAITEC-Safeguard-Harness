@@ -112,6 +112,34 @@ def test_evaluate_dataset_streams_predictions_and_progress(tmp_path: Path):
     assert progress == {"processed": 2, "total": 2, "status": "completed"}
 
 
+def test_evaluate_dataset_prints_terminal_progress(tmp_path: Path, capsys):
+    output_dir = tmp_path / "terminal_progress"
+
+    class SimplePipeline(Pipeline):
+        def __init__(self):
+            super().__init__(runner="static", methods={})
+
+        def judge(self, case: SafetyCase) -> Decision:
+            return Decision(
+                case_id=case.id,
+                label=case.label or "safe",
+                unsafe_score=1.0 if case.label == "unsafe" else 0.0,
+                confidence=1.0,
+            )
+
+    cases = [
+        SafetyCase(id="safe", question="hello", label="safe"),
+        SafetyCase(id="unsafe", question="bad", label="unsafe"),
+    ]
+
+    evaluate_dataset(SimplePipeline(), cases, output_dir)
+
+    stderr = capsys.readouterr().err
+    assert "[evaluate]" in stderr
+    assert "2/2" in stderr
+    assert "100.0%" in stderr
+
+
 def test_evaluate_dataset_marks_progress_failed_on_exception(tmp_path: Path):
     output_dir = tmp_path / "failed"
 

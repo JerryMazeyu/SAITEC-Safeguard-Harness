@@ -168,7 +168,9 @@ python -m safeguard_harness predict --pipeline configs/pipelines/prod_v1.yaml --
 
 当一个固定 pipeline 同时包含基座模型、LoRA 27B、Qwen3Guard 8B 和多模态模型时，可以在 pipeline YAML 顶层配置 `batch_scheduler`。该配置只影响 `predict` / `evaluate` 的批量路径；`judge` 单条判断仍按原 static runner 顺序执行。
 
-当前 `configs/pipelines/final.yaml` 指向的 S5 ensemble 已开启资源感知调度：
+当前 `configs/pipelines/final.yaml` 指向当前 CUDA 服务器可运行的 `final-current-server.yaml`，使用仓库 `models/Qwen3.6-27B` 软链接、`/ai/dataset/workspace/czy/model/...-merged` 的 27B LoRA merged 模型和本机 Qwen3Guard。生产环境入口保留为 `configs/pipelines/final-prod.yaml`，其中 `local_qwen3_6_27b_generation.yaml` 与 `local_qwen3_6_27b_lora_sft_prompt_binary.yaml` 继续使用 `/data/model/Qwen36-27B-SFT` 和 `device: npu:1`。
+
+这两个入口都已开启资源感知调度：
 
 ```yaml
 batch_scheduler:
@@ -312,6 +314,7 @@ base_llm:
 ```
 
 长时间跑本地大模型时，可以用这两个文件直接观察当前完成进度。
+运行时也会在终端 `stderr` 输出 ASCII 进度条；启用 `batch_scheduler` 的 pipeline 会额外输出每个模型 stage 的进度。若需要静默运行，可设置 `SAFEGUARD_HARNESS_PROGRESS=0`。
 
 ## 模型接口和模型文件放置规则
 

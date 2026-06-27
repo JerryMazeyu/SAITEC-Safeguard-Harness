@@ -176,7 +176,10 @@ def test_build_ascend_vllm_providers_from_config():
 
 def test_project_owned_runtime_provider_configs_do_not_expose_script_paths():
     provider_names = [
+        "local_qwen3_6_27b_generation.yaml",
+        "local_qwen3_6_27b_generation_current_server.yaml",
         "local_qwen3_6_27b_lora_sft_prompt_binary.yaml",
+        "local_qwen3_6_27b_lora_sft_prompt_binary_current_server.yaml",
         "local_qwen3guard_gen8b_refusal_probe.yaml",
         "local_qwen3guard_gen8b_refusal_probe_veto_safe.yaml",
         "local_qwen3_6_vl_projection_probe.yaml",

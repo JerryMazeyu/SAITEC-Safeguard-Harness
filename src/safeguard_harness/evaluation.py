@@ -10,6 +10,7 @@ import yaml
 from safeguard_harness.core import SAFE, UNSAFE, Decision, SafetyCase
 from safeguard_harness.datasets import deliverable_result_row, write_jsonl
 from safeguard_harness.orchestration import Pipeline
+from safeguard_harness.progress import TerminalProgress
 
 
 @dataclass
@@ -41,6 +42,8 @@ def evaluate_dataset(
         json.dumps({"processed": 0, "total": len(case_list), "status": "running"}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    terminal_progress = TerminalProgress("evaluate", len(case_list))
+    terminal_progress.start()
 
     processed = 0
     try:
@@ -66,20 +69,23 @@ def evaluate_dataset(
                     ),
                     encoding="utf-8",
                 )
+                terminal_progress.update(processed, current=f"case={case.id}")
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
         progress_path.write_text(
             json.dumps(
                 {
                     "processed": processed,
                     "total": len(case_list),
                     "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": error,
                 },
                 ensure_ascii=False,
                 indent=2,
             ),
             encoding="utf-8",
         )
+        terminal_progress.fail(processed=processed, error=error)
         raise
 
     metrics = compute_metrics(decisions)
@@ -99,6 +105,7 @@ def evaluate_dataset(
         json.dumps({"processed": len(case_list), "total": len(case_list), "status": "completed"}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    terminal_progress.finish()
     return EvaluationSummary(metrics=metrics, predictions=predictions, output_dir=output, deliverable_output=deliverable_path)
 
 

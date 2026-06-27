@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 from safeguard_harness.core import SAFE, UNSAFE, Decision, MethodResult, RunContext, RunTrace, SafetyCase, TraceStep
 from safeguard_harness.methods import JudgeMethod
+from safeguard_harness.progress import TerminalProgress
 
 
 @dataclass
@@ -346,17 +347,22 @@ class _ResourceAwareBatchRunner:
     ) -> dict[int, Decision]:
         stage_file = self._stage_file(stage_index, stage_id)
         decisions_by_index: dict[int, Decision] = {}
+        progress = TerminalProgress(stage_id, len(image_cases))
+        processed = 0
+        if image_cases:
+            progress.start()
         try:
             with stage_file.open("w", encoding="utf-8") as handle:
                 if image_cases:
                     image_case_list = [case for _, case in image_cases]
-                    image_decisions = list(
-                        multimodal_pipeline.judge_many(
-                            image_case_list,
-                            intermediate_dir=self.intermediate_dir / "multimodal",
-                        )
+                    image_decisions = multimodal_pipeline.judge_many(
+                        image_case_list,
+                        intermediate_dir=self.intermediate_dir / "multimodal",
                     )
-                    for (original_index, case), decision in zip(image_cases, image_decisions):
+                    for index, ((original_index, case), decision) in enumerate(
+                        zip(image_cases, image_decisions),
+                        start=1,
+                    ):
                         self._mark_resource_route(decision, stage_id=stage_id, route="multimodal")
                         decisions_by_index[original_index] = decision
                         handle.write(
@@ -371,6 +377,15 @@ class _ResourceAwareBatchRunner:
                             )
                             + "\n"
                         )
+                        handle.flush()
+                        processed = index
+                        progress.update(processed, current=f"case={case.id}")
+        except Exception as exc:
+            progress.fail(processed=processed, error=f"{type(exc).__name__}: {exc}")
+            raise
+        else:
+            if image_cases:
+                progress.finish()
         finally:
             self._release_resources(multimodal_pipeline)
         return decisions_by_index
@@ -388,47 +403,72 @@ class _ResourceAwareBatchRunner:
         stage_filter = str(stage.get("case_filter", "text"))
         context = RunContext(metadata={"resource_stage": stage_id})
         stage_file = self._stage_file(stage_index, stage_id)
+        work_items = self._stage_work_items(method_ids, stage_filter, text_units)
+        progress = TerminalProgress(stage_id, len(work_items))
+        processed = 0
+        if work_items:
+            progress.start()
         try:
             with stage_file.open("w", encoding="utf-8") as handle:
-                for method_id in method_ids:
-                    step = self.step_by_method.get(method_id, {"id": method_id, "method": method_id})
-                    for unit in text_units:
-                        if not _unit_matches_stage_filter(unit, stage_filter, self.pipeline.aggregation):
-                            continue
-                        if _step_skipped_for_case(step, unit.case):
-                            continue
-                        result = self.pipeline._run_method(method_id, unit.case, context)
-                        trace_step = TraceStep(
-                            step_id=str(step.get("id") or method_id),
-                            method_id=method_id,
-                            result=result,
-                            metadata={
-                                **_step_trace_metadata(step),
-                                "resource_stage": stage_id,
+                for index, (method_id, step, unit) in enumerate(work_items, start=1):
+                    result = self.pipeline._run_method(method_id, unit.case, context)
+                    trace_step = TraceStep(
+                        step_id=str(step.get("id") or method_id),
+                        method_id=method_id,
+                        result=result,
+                        metadata={
+                            **_step_trace_metadata(step),
+                            "resource_stage": stage_id,
+                            "original_case_id": unit.original_case.id,
+                        },
+                    )
+                    if unit.pair_index is not None:
+                        trace_step.metadata["multi_turn_pair_index"] = unit.pair_index
+                    traces_by_unit_id[unit.case.id].add_step(trace_step)
+                    handle.write(
+                        json.dumps(
+                            {
+                                "stage": stage_id,
+                                "case_id": unit.case.id,
                                 "original_case_id": unit.original_case.id,
+                                "step": trace_step.to_dict(),
                             },
+                            ensure_ascii=False,
                         )
-                        if unit.pair_index is not None:
-                            trace_step.metadata["multi_turn_pair_index"] = unit.pair_index
-                        traces_by_unit_id[unit.case.id].add_step(trace_step)
-                        handle.write(
-                            json.dumps(
-                                {
-                                    "stage": stage_id,
-                                    "case_id": unit.case.id,
-                                    "original_case_id": unit.original_case.id,
-                                    "step": trace_step.to_dict(),
-                                },
-                                ensure_ascii=False,
-                            )
-                            + "\n"
-                        )
+                        + "\n"
+                    )
+                    handle.flush()
+                    processed = index
+                    progress.update(processed, current=f"{method_id}:case={unit.original_case.id}")
+        except Exception as exc:
+            progress.fail(processed=processed, error=f"{type(exc).__name__}: {exc}")
+            raise
+        else:
+            if work_items:
+                progress.finish()
         finally:
             self._release_resources([self.pipeline.methods[method_id] for method_id in method_ids if method_id in self.pipeline.methods])
 
     def _aggregate_unit_decision(self, case: SafetyCase, trace: RunTrace) -> Decision:
         trace.stop_reason = trace.stop_reason or "completed"
         return self.pipeline.aggregate(case.id, trace, case=case)
+
+    def _stage_work_items(
+        self,
+        method_ids: list[str],
+        stage_filter: str,
+        text_units: list[_TextExecutionUnit],
+    ) -> list[tuple[str, dict[str, Any], _TextExecutionUnit]]:
+        work_items: list[tuple[str, dict[str, Any], _TextExecutionUnit]] = []
+        for method_id in method_ids:
+            step = self.step_by_method.get(method_id, {"id": method_id, "method": method_id})
+            for unit in text_units:
+                if not _unit_matches_stage_filter(unit, stage_filter, self.pipeline.aggregation):
+                    continue
+                if _step_skipped_for_case(step, unit.case):
+                    continue
+                work_items.append((method_id, step, unit))
+        return work_items
 
     def _step_by_method(self) -> dict[str, dict[str, Any]]:
         steps: dict[str, dict[str, Any]] = {}

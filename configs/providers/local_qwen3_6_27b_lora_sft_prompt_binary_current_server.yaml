@@ -1,0 +1,11 @@
+type: merged_safeguard_prompt_binary
+description: "Current CUDA server Qwen3.6-27B SafeGuard LoRA SFT merged model."
+model_path: /ai/dataset/workspace/czy/model/Qwen3.6-27B-SafeGuard-strategy2-plus-manage-r1-safety-only-lang-1to1-content-zh80-translated-checkpoint-3141-merged
+device: auto
+torch_dtype: bfloat16
+max_new_tokens: 32
+device_map: auto
+cache_model: true
+use_llm_parse_fallback: true
+disable_torch_compile: true
+patch_torch_distributed_tensor: true

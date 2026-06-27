@@ -1,0 +1,99 @@
+name: s5_side_constrained_ensemble_current_server
+runner: static
+
+batch_scheduler:
+  enabled: true
+  multimodal_pipeline: single_multimodal_probe_v1.yaml
+  multimodal_stage_id: multimodal_base
+  stages:
+    - id: text_base
+      methods:
+        - progressive_rules_v1
+      case_filter: text
+    - id: lora_27b
+      methods:
+        - policy_classifier_v1
+        - intent_classifier_v1
+      case_filter: text
+    - id: refusal_8b
+      methods:
+        - refusal_probe_v1
+      case_filter: text_input
+
+methods:
+  progressive_rules_v1:
+    type: progressive_rule_classifier
+    provider_config: ../providers/local_qwen3_6_27b_generation_current_server.yaml
+    max_rule_rounds: 2
+    max_rule_files: 3
+    default_confidence: 0.70
+    input_view: full
+    rule_manifest_path: ../rules/progressive/qwen_binary_v7_extracted_rules.yaml
+
+  policy_classifier_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_6_27b_lora_sft_prompt_binary_current_server.yaml
+    prompt_template_path: ../prompts/qwen_binary_policy_v7.txt
+    default_confidence: 0.70
+    input_view: full
+
+  intent_classifier_v1:
+    type: prompt_binary_model
+    provider_config: ../providers/local_qwen3_6_27b_lora_sft_prompt_binary_current_server.yaml
+    prompt_template_path: ../prompts/qwen_binary_intent_v7.txt
+    default_confidence: 0.70
+    input_view: full
+
+  refusal_probe_v1:
+    type: refusal_probe
+    provider_config: ../providers/local_qwen3guard_gen8b_refusal_probe_veto_safe.yaml
+    prompt_template_path: ../prompts/qwen3guard_output_probe_v1.txt
+    response_parser: binary_or_refusal
+    unsafe_confidence: 0.95
+    safe_confidence: 0.75
+    input_view: answer_if_present
+
+steps:
+  - id: progressive_rules_v1
+    method: progressive_rules_v1
+  - id: policy_classifier_v1
+    method: policy_classifier_v1
+  - id: intent_classifier_v1
+    method: intent_classifier_v1
+  - id: refusal_probe_v1
+    method: refusal_probe_v1
+    skip_when_metadata:
+      type: ["输出侧", "output", "output_side", "response", "assistant"]
+
+aggregation:
+  strategy: side_branch_rules
+  side_metadata_key: type
+  default_branch: input
+  input_values: ["输入侧", "input", "input_side", "prompt", "user"]
+  output_values: ["输出侧", "output", "output_side", "response", "assistant"]
+
+  input_rule:
+    type: weighted_score_threshold
+    methods:
+      - progressive_rules_v1
+      - policy_classifier_v1
+      - intent_classifier_v1
+      - refusal_probe_v1
+    weights: [1, 1, 3, 2]
+    threshold: 3.0
+
+  output_rule:
+    type: binary_truth_table
+    methods:
+      - progressive_rules_v1
+      - policy_classifier_v1
+      - intent_classifier_v1
+    table:
+      "000": safe
+      "001": unsafe
+      "010": unsafe
+      "011": unsafe
+      "100": unsafe
+      "101": unsafe
+      "110": safe
+      "111": unsafe

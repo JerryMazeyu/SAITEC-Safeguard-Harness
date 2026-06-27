@@ -1,0 +1,14 @@
+type: local_text_generation_lm
+description: "Current CUDA server Qwen3.6-27B generative model used by progressive rules."
+model_path: ../../models/Qwen3.6-27B
+trust_remote_code: true
+device: auto
+device_map: auto
+torch_dtype: auto
+use_chat_template: true
+enable_thinking: false
+do_sample: false
+max_new_tokens: 256
+cache_model: true
+disable_torch_compile: true
+patch_torch_distributed_tensor: true
