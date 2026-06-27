@@ -98,3 +98,4 @@
 - 2026.06.27 17:18 继续收敛 `final-prod.yaml` 依赖的文本 27B provider：progressive 与 policy/intent 均切到 `/data/model/Qwen36-27B-SFT`，显式设备改为 `npu:1`，并补充本地 generation provider 对 `device` 字段的兼容支持。
 - 2026.06.27 17:20 按部署端口调整 `final-prod.yaml`：8B refusal probe 改用现有 `ascend_vllm_safeguard_generation_8001.yaml`，对应 `http://127.0.0.1:8001/v1` 与模型名 `qwen3guard-8b`，移除 5001 临时 provider。
 - 2026.06.27 17:35 拆分当前服务器与生产环境入口：保留 `final-prod.yaml` 及其 `/data/model/Qwen36-27B-SFT`、`device: npu:1` provider 不变，新增 `final-current-server.yaml` 与 `_current_server` provider 使用当前 CUDA 服务器可读的 `/ai/dataset/workspace/czy/model`/`models/Qwen3.6-27B` 路径，并将 `final.yaml` 软链接指向当前服务器入口；新增配置分离测试、README 说明，全量测试 98 passed。
+- 2026.06.27 18:35 为 runner 增加终端实时进度输出：新增 `TerminalProgress`，`evaluate` / `predict` 输出总体 ASCII 进度条，启用 `batch_scheduler` 时按 `multimodal_base`、`text_base`、`lora_27b`、`refusal_8b` 等 stage 输出当前处理进度；支持 `SAFEGUARD_HARNESS_PROGRESS=0` 静默关闭，并补充终端进度测试。

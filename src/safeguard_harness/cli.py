@@ -9,6 +9,7 @@ from safeguard_harness.config import load_pipeline
 from safeguard_harness.core import SafetyCase
 from safeguard_harness.datasets import deliverable_result_row, load_jsonl_cases, write_jsonl
 from safeguard_harness.evaluation import evaluate_dataset
+from safeguard_harness.progress import TerminalProgress
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -67,9 +68,19 @@ def cmd_predict(args: argparse.Namespace) -> int:
     cases = load_jsonl_cases(args.input)
     rows = []
     deliverable_rows = []
-    for case, decision in zip(cases, pipeline.judge_many(cases, intermediate_dir=_default_intermediate_dir(args.output))):
-        rows.append({"case_id": case.id, **decision.to_dict()})
-        deliverable_rows.append(deliverable_result_row(case, decision))
+    terminal_progress = TerminalProgress("predict", len(cases))
+    terminal_progress.start()
+    processed = 0
+    try:
+        decisions_iter = pipeline.judge_many(cases, intermediate_dir=_default_intermediate_dir(args.output))
+        for processed, (case, decision) in enumerate(zip(cases, decisions_iter), start=1):
+            terminal_progress.update(processed, current=f"case={case.id}")
+            rows.append({"case_id": case.id, **decision.to_dict()})
+            deliverable_rows.append(deliverable_result_row(case, decision))
+    except Exception as exc:
+        terminal_progress.fail(processed=processed, error=f"{type(exc).__name__}: {exc}")
+        raise
+    terminal_progress.finish()
     write_jsonl(args.output, rows)
     deliverable_output = Path(args.deliverable_output) if args.deliverable_output else _default_deliverable_path(args.output)
     write_jsonl(deliverable_output, deliverable_rows)

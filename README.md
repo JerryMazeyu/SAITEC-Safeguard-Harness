@@ -314,6 +314,7 @@ base_llm:
 ```
 
 长时间跑本地大模型时，可以用这两个文件直接观察当前完成进度。
+运行时也会在终端 `stderr` 输出 ASCII 进度条；启用 `batch_scheduler` 的 pipeline 会额外输出每个模型 stage 的进度。若需要静默运行，可设置 `SAFEGUARD_HARNESS_PROGRESS=0`。
 
 ## 模型接口和模型文件放置规则
 

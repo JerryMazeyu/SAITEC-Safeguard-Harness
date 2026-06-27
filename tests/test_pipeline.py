@@ -188,7 +188,7 @@ aggregation:
     assert "weather answer" not in prompts[1]
 
 
-def test_resource_aware_batch_scheduler_groups_cases_by_model_stage_and_preserves_routes(tmp_path: Path):
+def test_resource_aware_batch_scheduler_groups_cases_by_model_stage_and_preserves_routes(tmp_path: Path, capsys):
     multimodal_pipeline_path = tmp_path / "single_multimodal.yaml"
     multimodal_pipeline_path.write_text(
         """
@@ -320,6 +320,12 @@ aggregation:
         "02_lora_27b.jsonl",
         "03_refusal_8b.jsonl",
     ]
+    stderr = capsys.readouterr().err
+    assert "[multimodal_base]" in stderr
+    assert "[text_base]" in stderr
+    assert "[lora_27b]" in stderr
+    assert "[refusal_8b]" in stderr
+    assert "100.0%" in stderr
 
 
 def test_static_pipeline_keeps_multi_turn_input_side_as_one_case(tmp_path: Path):
