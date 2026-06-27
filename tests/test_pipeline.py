@@ -796,6 +796,57 @@ aggregation:
     assert output_decision.metadata["truth_table_pattern"] == "110"
 
 
+def test_side_branch_rules_keeps_required_skipped_results_as_neutral_signal():
+    trace = RunTrace(case_id="input")
+    trace.add_step(
+        TraceStep(
+            step_id="progressive_rules_v1",
+            method_id="progressive_rules_v1",
+            result=MethodResult(
+                method_id="progressive_rules_v1",
+                label="unknown",
+                unsafe_score=0.0,
+                confidence=0.0,
+                evidence=["progressive rule classifier did not produce a final verdict"],
+                skipped=True,
+            ),
+        )
+    )
+    for method_id in ("policy_classifier_v1", "intent_classifier_v1", "refusal_probe_v1"):
+        trace.add_step(
+            TraceStep(
+                step_id=method_id,
+                method_id=method_id,
+                result=MethodResult(method_id=method_id, label="safe", unsafe_score=0.0, confidence=0.7),
+            )
+        )
+
+    pipeline = StaticPipeline(
+        runner="static",
+        methods={},
+        aggregation={
+            "strategy": "side_branch_rules",
+            "input_rule": {
+                "type": "weighted_score_threshold",
+                "methods": [
+                    "progressive_rules_v1",
+                    "policy_classifier_v1",
+                    "intent_classifier_v1",
+                    "refusal_probe_v1",
+                ],
+                "weights": [1, 1, 3, 2],
+                "threshold": 3.0,
+            },
+        },
+    )
+
+    decision = pipeline.aggregate("input", trace, SafetyCase(id="input", question="benign"))
+
+    assert decision.label == "safe"
+    assert decision.metadata["rule_skipped_methods"] == ["progressive_rules_v1"]
+    assert decision.metadata["raw_weighted_score"] == 0.0
+
+
 def test_react_pipeline_respects_max_steps_and_allowed_actions(tmp_path: Path):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(

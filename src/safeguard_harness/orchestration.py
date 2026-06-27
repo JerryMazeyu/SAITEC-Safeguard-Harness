@@ -54,12 +54,13 @@ class Pipeline:
     def aggregate(self, case_id: str, trace: RunTrace, case: SafetyCase | None = None) -> Decision:
         threshold = float(self.aggregation.get("unsafe_threshold", 0.5))
         strategy = str(self.aggregation.get("strategy", "max"))
-        results = [
+        all_results = [
             step.result
             for step in trace.steps
-            if not step.result.skipped and step.metadata.get("include_in_aggregation", True) is not False
+            if step.metadata.get("include_in_aggregation", True) is not False
         ]
-        if not results:
+        results = [result for result in all_results if not result.skipped]
+        if not all_results or (strategy != "side_branch_rules" and not results):
             return Decision(
                 case_id=case_id,
                 label=SAFE,
@@ -73,7 +74,7 @@ class Pipeline:
             return _side_branch_rules_decision(
                 case_id=case_id,
                 trace=trace,
-                results=results,
+                results=all_results,
                 aggregation=self.aggregation,
                 case=case,
             )
@@ -966,6 +967,7 @@ def _apply_weighted_score_threshold(
     metadata = {
         "rule_type": "weighted_score_threshold",
         "rule_methods": [result.method_id for result in method_results],
+        "rule_skipped_methods": [result.method_id for result in method_results if result.skipped],
         "rule_weights": weights,
         "raw_weighted_score": raw_score,
         "weighted_threshold": threshold,
@@ -989,6 +991,7 @@ def _apply_binary_truth_table(
     metadata = {
         "rule_type": "binary_truth_table",
         "rule_methods": [result.method_id for result in method_results],
+        "rule_skipped_methods": [result.method_id for result in method_results if result.skipped],
         "truth_table_pattern": pattern,
         "truth_table_value": table[pattern],
     }
